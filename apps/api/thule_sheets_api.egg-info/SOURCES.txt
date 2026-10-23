@@ -1,0 +1,6 @@
+pyproject.toml
+thule_sheets_api.egg-info/PKG-INFO
+thule_sheets_api.egg-info/SOURCES.txt
+thule_sheets_api.egg-info/dependency_links.txt
+thule_sheets_api.egg-info/requires.txt
+thule_sheets_api.egg-info/top_level.txt

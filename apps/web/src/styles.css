@@ -1,0 +1,137 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter';
+
+@theme {
+  --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, monospace;
+
+  --color-app: #0b0b10;
+  --color-panel: #13131a;
+  --color-panel-2: #181820;
+  --color-raised: #1e1e28;
+  --color-hover: #262633;
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-strong: rgb(255 255 255 / 0.12);
+  --color-fg: #ececf1;
+  --color-fg-muted: #9a9cab;
+  --color-fg-subtle: #6b6d7c;
+  --color-accent: #8b5cf6;
+  --color-accent-strong: #7c3aed;
+  --color-accent-soft: rgb(139 92 246 / 0.16);
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+  --color-bad: #f87171;
+
+  --radius-window: 18px;
+  --shadow-window: 0 24px 60px -20px rgb(0 0 0 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.05);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-app);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+    overflow: hidden;
+  }
+
+  /* Ambient glow behind the windows, as in macOS wallpapers. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(60rem 40rem at -10% -20%, rgb(190 40 90 / 0.28), transparent 60%),
+      radial-gradient(50rem 40rem at 110% 120%, rgb(88 60 200 / 0.22), transparent 60%);
+    z-index: 0;
+  }
+
+  ::selection {
+    background: rgb(139 92 246 / 0.35);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 0.14) transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(139 92 246 / 0.7);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .window {
+    background: rgb(19 19 26 / 0.86);
+    backdrop-filter: blur(28px) saturate(140%);
+    border-radius: var(--radius-window);
+    box-shadow: var(--shadow-window);
+  }
+
+  .glass {
+    background: rgb(22 22 30 / 0.72);
+    backdrop-filter: blur(24px) saturate(150%);
+  }
+
+  .hairline {
+    border: 1px solid var(--color-line);
+  }
+}
+
+/* --- Univer overrides: blend the canvas host into the window. --- */
+.univer-host {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.univer-host .univer-workbench-container,
+.univer-host [class*='univer-workbench'] {
+  background: transparent !important;
+}
+
+/* --- CodeMirror (SQL console) --- */
+.cm-editor .cm-tooltip {
+  background: #1e1e28;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px -12px rgb(0 0 0 / 0.7);
+  overflow: hidden;
+}
+
+.cm-editor .cm-tooltip-autocomplete > ul {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 4px;
+}
+
+.cm-editor .cm-tooltip-autocomplete > ul > li {
+  border-radius: 6px;
+  padding: 2px 8px !important;
+  color: var(--color-fg);
+}
+
+.cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.cm-editor .cm-completionIcon {
+  display: none;
+}
+
+.cm-editor .cm-completionMatchedText {
+  text-decoration: none;
+  font-weight: 600;
+}

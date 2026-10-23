@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: thule-sheets-api
+Version: 0.1.0
+Summary: Thule Sheets backend
+Requires-Python: >=3.12
+Requires-Dist: fastapi>=0.161
+Requires-Dist: uvicorn[standard]>=0.54
+Requires-Dist: sqlalchemy[asyncio]>=2.1
+Requires-Dist: asyncpg>=0.32
+Requires-Dist: alembic>=1.20
+Requires-Dist: pydantic>=2.14
+Requires-Dist: pydantic-settings>=2.16
+Requires-Dist: pyjwt>=2.15
+Requires-Dist: pwdlib[argon2]>=0.3
+Requires-Dist: openpyxl>=3.1.5
+Requires-Dist: cryptography>=50
+Requires-Dist: redis>=8.1
+Requires-Dist: python-multipart>=0.0.32
+Provides-Extra: dev
+Requires-Dist: pytest>=9.1; extra == "dev"
+Requires-Dist: pytest-asyncio>=1.4; extra == "dev"
+Requires-Dist: httpx>=0.28; extra == "dev"
+Requires-Dist: ruff>=0.17; extra == "dev"
+Requires-Dist: mypy>=2.4; extra == "dev"
