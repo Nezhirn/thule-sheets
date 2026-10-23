@@ -18,6 +18,7 @@ export function SheetTabs({
   readOnly,
   zoom,
   onZoom,
+  light,
 }: {
   api: FUniver | null;
   sheets: SheetInfo[];
@@ -25,6 +26,7 @@ export function SheetTabs({
   readOnly: boolean;
   zoom: number;
   onZoom: (value: number) => void;
+  light: boolean;
 }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -65,14 +67,23 @@ export function SheetTabs({
     if (sheet && workbook) workbook.duplicateSheet(sheet);
   }
 
+  const tone = light
+    ? '!text-black/55 hover:!bg-black/[0.05] hover:!text-black'
+    : undefined;
+
   return (
-    <div className="flex h-12 shrink-0 items-center gap-1 border-t border-line px-3">
-      <IconButton label="Добавить лист" disabled={readOnly || !api} onClick={add}>
+    <div
+      className={clsx(
+        'flex h-12 shrink-0 items-center gap-1 border-t px-3',
+        light ? 'border-black/10 text-black/70' : 'border-line',
+      )}
+    >
+      <IconButton label="Добавить лист" className={tone} disabled={readOnly || !api} onClick={add}>
         <Plus className="size-[17px]" />
       </IconButton>
       <Menu>
         <MenuTrigger asChild>
-          <IconButton label="Все листы">
+          <IconButton label="Все листы" className={tone}>
             <List className="size-[17px]" />
           </IconButton>
         </MenuTrigger>
@@ -98,7 +109,10 @@ export function SheetTabs({
                 if (e.key === 'Enter') commitRename();
                 if (e.key === 'Escape') setRenaming(null);
               }}
-              className="h-9 w-32 rounded-lg bg-app px-3 text-[14px] outline-none ring-2 ring-accent/60"
+              className={clsx(
+                'h-9 w-32 rounded-lg px-3 text-[14px] outline-none ring-2 ring-accent/60',
+                light ? 'bg-black/[0.04] text-black' : 'bg-app',
+              )}
             />
           ) : (
             <ContextMenu.Root key={sheet.id}>
@@ -113,8 +127,13 @@ export function SheetTabs({
                   className={clsx(
                     'relative h-9 shrink-0 rounded-lg px-5 text-[14px] transition',
                     sheet.id === activeId
-                      ? 'bg-accent-soft font-semibold text-fg after:absolute after:inset-x-3 after:-bottom-[7px] after:h-[2px] after:rounded-full after:bg-accent'
-                      : 'text-fg-muted hover:bg-hover hover:text-fg',
+                      ? clsx(
+                          'bg-accent-soft font-semibold after:absolute after:inset-x-3 after:-bottom-[7px] after:h-[2px] after:rounded-full after:bg-accent',
+                          light ? 'text-black' : 'text-fg',
+                        )
+                      : light
+                        ? 'text-black/55 hover:bg-black/[0.05] hover:text-black'
+                        : 'text-fg-muted hover:bg-hover hover:text-fg',
                   )}
                 >
                   {sheet.name}
@@ -145,17 +164,25 @@ export function SheetTabs({
             </ContextMenu.Root>
           ),
         )}
-        <IconButton label="Новый лист" disabled={readOnly || !api} onClick={add}>
+        <IconButton label="Новый лист" className={tone} disabled={readOnly || !api} onClick={add}>
           <Plus className="size-[17px]" />
         </IconButton>
       </div>
 
-      <div className="ml-auto flex shrink-0 items-center gap-1 text-[14px]">
-        <IconButton label="Уменьшить" onClick={() => onZoom(Math.max(0.5, Math.round((zoom - 0.1) * 10) / 10))}>
+      <div className={clsx('ml-auto flex shrink-0 items-center gap-1 text-[14px]', light && 'text-black/70')}>
+        <IconButton
+          label="Уменьшить"
+          className={tone}
+          onClick={() => onZoom(Math.max(0.5, Math.round((zoom - 0.1) * 10) / 10))}
+        >
           <Minus className="size-4" />
         </IconButton>
         <span className="w-12 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
-        <IconButton label="Увеличить" onClick={() => onZoom(Math.min(2, Math.round((zoom + 0.1) * 10) / 10))}>
+        <IconButton
+          label="Увеличить"
+          className={tone}
+          onClick={() => onZoom(Math.min(2, Math.round((zoom + 0.1) * 10) / 10))}
+        >
           <Plus className="size-4" />
         </IconButton>
       </div>

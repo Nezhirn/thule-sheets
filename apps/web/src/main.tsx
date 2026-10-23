@@ -34,7 +34,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
 function Shell() {
   return (
     <RequireAuth>
-      <div className="relative flex h-full gap-4 p-4">
+      <div className="relative flex h-full gap-2 p-4">
         <Sidebar />
         <Suspense
           fallback={

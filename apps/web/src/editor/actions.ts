@@ -231,7 +231,8 @@ export function toNumber(value: unknown): number | null {
 }
 
 /** Univer dark mode inverts canvas colors; show swatches the way they will be rendered. */
-export function displayColor(hex: string): string {
+export function displayColor(hex: string, invert = true): string {
+  if (!invert) return hex;
   const value = hex.replace('#', '');
   if (!/^[0-9a-f]{6}$/i.test(value)) return hex;
   const r = Number.parseInt(value.slice(0, 2), 16) / 255;

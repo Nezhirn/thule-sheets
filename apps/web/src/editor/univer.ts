@@ -36,7 +36,7 @@ export interface UniverHandle {
   dispose: () => void;
 }
 
-export function bootUniver(container: HTMLElement): UniverHandle {
+export function bootUniver(container: HTMLElement, darkMode = true): UniverHandle {
   const { univer, univerAPI } = createUniver({
     locale: LocaleType.RU_RU,
     locales: {
@@ -44,7 +44,8 @@ export function bootUniver(container: HTMLElement): UniverHandle {
     },
     theme,
     // Dark mode inverts canvas colors, so snapshots keep "light" colors and export as-is.
-    darkMode: true,
+    // The user can switch the sheet to a white canvas at runtime.
+    darkMode,
     presets: [
       UniverSheetsCorePreset({
         container,

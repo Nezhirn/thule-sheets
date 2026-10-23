@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, Home, Plus, Star, UserRound, UsersRound } from 'lucide-react';
+import { ChevronDown, Home, Moon, Plus, Star, Sun, UserRound, UsersRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 
@@ -62,6 +62,9 @@ export function WorkbookPage() {
   const [sheets, setSheets] = useState<SheetInfo[]>([]);
   const [activeSheet, setActiveSheet] = useState('');
   const [zoom, setZoom] = useState(1);
+  const [lightSheet, setLightSheet] = useState(
+    () => localStorage.getItem('thule.sheet-light') === '1',
+  );
   const [saveState, setSaveState] = useState<SaveState>('saved');
   const [status, setStatus] = useState<SyncStatus>('connecting');
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -92,7 +95,7 @@ export function WorkbookPage() {
     const data = detail.data;
     if (!data || !container.current) return;
     let cancelled = false;
-    const h = bootUniver(container.current);
+    const h = bootUniver(container.current, !lightSheet);
     handle.current = h;
     const univerApi = h.api;
     createWorkbook(univerApi, data.snapshot);
@@ -182,6 +185,11 @@ export function WorkbookPage() {
     // toggle (new object identity, same workbook).
   }, [detail.data?.id, refreshUi, toast]);
 
+  // The engine starts in the saved mode; subsequent switches are applied in place.
+  useEffect(() => {
+    univer?.toggleDarkMode(!lightSheet);
+  }, [univer, lightSheet]);
+
   useEffect(() => {
     if (title) document.title = `${title} — Thule Sheets`;
     return () => {
@@ -195,6 +203,14 @@ export function WorkbookPage() {
     if (!sheet) return;
     sheet.zoom(value);
     setZoom(value);
+  }
+
+  function toggleSheetLight() {
+    setLightSheet((previous) => {
+      const next = !previous;
+      localStorage.setItem('thule.sheet-light', next ? '1' : '0');
+      return next;
+    });
   }
 
   async function exportAs(format: 'xlsx' | 'csv') {
@@ -388,6 +404,13 @@ export function WorkbookPage() {
             <MenuItem onSelect={run(commands.unfreeze)}>Снять закрепление</MenuItem>
             <MenuSeparator />
             <MenuItem onSelect={run(commands.toggleGridlines)}>Показать / скрыть сетку</MenuItem>
+            <MenuSeparator />
+            <MenuItem
+              icon={lightSheet ? <Moon className="size-4" /> : <Sun className="size-4" />}
+              onSelect={toggleSheetLight}
+            >
+              {lightSheet ? 'Тёмная таблица' : 'Белая таблица'}
+            </MenuItem>
           </TopMenu>
           <TopMenu label="Вставка">
             <MenuItem disabled={readOnly} onSelect={run(commands.insertRowBefore)}>
@@ -462,7 +485,14 @@ export function WorkbookPage() {
             <MenuItem onSelect={() => setDialog('versions')}>История версий</MenuItem>
           </TopMenu>
         </nav>
-        <Toolbar api={univer} selection={selection} readOnly={readOnly} zoom={zoom} onZoom={setZoomLevel} />
+        <Toolbar
+          api={univer}
+          selection={selection}
+          readOnly={readOnly}
+          zoom={zoom}
+          onZoom={setZoomLevel}
+          darkCanvas={!lightSheet}
+        />
       </div>
 
       <div className="pt-2">
@@ -471,10 +501,20 @@ export function WorkbookPage() {
 
 
       {/* Sheet */}
-      <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-[#101016] hairline">
+      <section
+        className={clsx(
+          'relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl',
+          lightSheet ? 'border border-black/10 bg-white' : 'bg-[#101016] hairline',
+        )}
+      >
         <div ref={container} className="univer-host min-h-0 flex-1" />
         {(!univer || rebuilding) && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#101016]/70">
+          <div
+            className={clsx(
+              'absolute inset-0 flex items-center justify-center',
+              lightSheet ? 'bg-white/70' : 'bg-[#101016]/70',
+            )}
+          >
             <Spinner className="size-6" />
           </div>
         )}
@@ -485,6 +525,7 @@ export function WorkbookPage() {
           readOnly={readOnly}
           zoom={zoom}
           onZoom={setZoomLevel}
+          light={lightSheet}
         />
       </section>
 

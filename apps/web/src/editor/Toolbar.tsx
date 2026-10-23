@@ -73,6 +73,7 @@ function ColorPicker({
   onPick,
   onReset,
   disabled,
+  invert,
 }: {
   label: string;
   icon: ReactNode;
@@ -80,6 +81,7 @@ function ColorPicker({
   onPick: (color: string) => void;
   onReset: () => void;
   disabled?: boolean;
+  invert: boolean;
 }) {
   return (
     <Popover.Root>
@@ -89,7 +91,7 @@ function ColorPicker({
             {icon}
             <span
               className="-mt-0.5 h-[3px] w-4 rounded-full"
-              style={{ background: current ? displayColor(current) : 'transparent' }}
+              style={{ background: current ? displayColor(current, invert) : 'transparent' }}
             />
           </span>
           <ChevronDown className="size-3 text-fg-subtle" />
@@ -114,7 +116,7 @@ function ColorPicker({
                     'size-5 rounded-full ring-1 ring-white/10 transition hover:scale-110',
                     current?.toUpperCase() === color && 'ring-2 ring-accent',
                   )}
-                  style={{ background: displayColor(color) }}
+                  style={{ background: displayColor(color, invert) }}
                 />
               </Popover.Close>
             ))}
@@ -131,12 +133,14 @@ export function Toolbar({
   readOnly,
   zoom,
   onZoom,
+  darkCanvas,
 }: {
   api: FUniver | null;
   selection: SelectionState;
   readOnly: boolean;
   zoom: number;
   onZoom: (value: number) => void;
+  darkCanvas: boolean;
 }) {
   const disabled = !api || readOnly;
   const call = (fn: (api: FUniver) => void) => () => api && fn(api);
@@ -212,6 +216,7 @@ export function Toolbar({
         icon={<Baseline className="size-[17px]" />}
         current={selection.color}
         disabled={disabled}
+        invert={darkCanvas}
         onPick={(color) => api && commands.textColor(api, color)}
         onReset={call(commands.resetTextColor)}
       />
@@ -220,6 +225,7 @@ export function Toolbar({
         icon={<PaintBucket className="size-[17px]" />}
         current={selection.background}
         disabled={disabled}
+        invert={darkCanvas}
         onPick={(color) => api && commands.background(api, color)}
         onReset={call(commands.resetBackground)}
       />
