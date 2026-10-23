@@ -25,12 +25,16 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
 
     max_upload_mb: int = 20
+    # Hard cap for any HTTP request body, enforced before routing (bytes).
+    max_request_mb: int = 64
 
     # External PostgreSQL connections.
     allow_private_db_hosts: bool = False
     db_statement_timeout_ms: int = 15_000
     db_query_row_limit: int = 10_000
     db_page_size_max: int = 1_000
+    # Approximate byte budget for a SQL-console result; large values are aborted.
+    db_query_byte_limit: int = 16_000_000
 
     # Built SPA served by the API (single-container deployment).
     static_dir: Path | None = None

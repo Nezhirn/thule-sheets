@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from app.main import app
 from tests.conftest import personal_workspace, register
 
 
@@ -76,6 +77,17 @@ async def test_workbook_lifecycle(client: httpx.AsyncClient) -> None:
     versions = (await client.get(f"/api/workbooks/{wb['id']}/versions")).json()
     assert len(versions) == 1
 
+    # A restore advances snapshot_rev; a client that still holds the old state
+    # must receive a conflict instead of a silent 200 that drops edits.
+    version = (await client.post(f"/api/workbooks/{wb['id']}/versions", json={})).json()
+    restored = await client.post(f"/api/workbooks/{wb['id']}/versions/{version['id']}/restore")
+    assert restored.status_code == 200
+    stale = await client.put(
+        f"/api/workbooks/{wb['id']}/snapshot", json={"rev": 0, "snapshot": wb["snapshot"]}
+    )
+    assert stale.status_code == 409
+    assert "stale" in stale.json()["detail"].lower()
+
     assert (await client.delete(f"/api/workbooks/{wb['id']}")).status_code == 204
     assert (await client.get(f"/api/workbooks/{wb['id']}")).status_code == 404
 
@@ -107,8 +119,18 @@ async def test_sharing_and_permissions(client: httpx.AsyncClient) -> None:
     )
     assert r.status_code == 403
 
+    # An external sharee cannot re-share or enumerate the workspace roster.
+    r = await client.put(
+        f"/api/workbooks/{wb['id']}/shares", json={"email": "owner@example.com", "role": "viewer"}
+    )
+    assert r.status_code in (403, 404)
+    visible = (await client.get(f"/api/workbooks/{wb['id']}/shares")).json()
+    assert [(s["email"], s["source"]) for s in visible] == [("viewer@example.com", "share")]
+
     client.cookies.clear()
     client.cookies.update(owner_cookies)
+    roster = (await client.get(f"/api/workbooks/{wb['id']}/shares")).json()
+    assert {s["email"] for s in roster} == {"owner@example.com", "viewer@example.com"}
     other_ws = (await client.post("/api/workspaces", json={"name": "Проекты"})).json()
     assert other_ws["role"] == "owner"
 
@@ -207,3 +229,33 @@ def test_realtime_rejects_viewers_and_strangers(sync_client: TestClient) -> None
             }
         )
         assert s.receive_json() == {"type": "error", "message": "Read-only access"}
+
+
+def test_realtime_rechecks_access_on_every_batch(sync_client: TestClient) -> None:
+    """A socket opened as editor must stop writing after the share is revoked."""
+    _login(sync_client, "owner@example.com", "Owner")
+    ws_id = next(w["id"] for w in sync_client.get("/api/workspaces").json() if w["is_personal"])
+    wb = sync_client.post("/api/workbooks", json={"workspace_id": ws_id}).json()
+
+    viewer = TestClient(app)
+    _login(viewer, "connected@example.com", "Connected")
+    r = sync_client.put(
+        f"/api/workbooks/{wb['id']}/shares",
+        json={"email": "connected@example.com", "role": "editor"},
+    )
+    assert r.status_code == 200
+    viewer_id = r.json()["user_id"]
+
+    url = f"/api/workbooks/{wb['id']}/ws"
+    with viewer.websocket_connect(url) as socket:
+        assert socket.receive_json()["role"] == "editor"
+        revoked = sync_client.delete(f"/api/workbooks/{wb['id']}/shares/{viewer_id}")
+        assert revoked.status_code == 204
+        socket.send_json(
+            {
+                "type": "ops",
+                "opId": "after-revoke",
+                "ops": [{"id": "sheet.mutation.set-range-values", "params": {}}],
+            }
+        )
+        assert socket.receive_json() == {"type": "error", "message": "Read-only access"}

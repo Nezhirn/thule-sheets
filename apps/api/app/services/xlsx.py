@@ -10,6 +10,7 @@ import io
 import json
 import re
 import secrets
+import zipfile
 from datetime import date, datetime, time
 from typing import Any
 
@@ -28,6 +29,15 @@ from openpyxl.worksheet.worksheet import Worksheet
 from app.services.templates import APP_VERSION, LOCALE
 
 MAX_CELLS = 500_000
+MAX_SHEETS = 64
+# Archive guards run before openpyxl builds cell objects: a small zip can inflate
+# to gigabytes of worksheet XML (zip bomb) or declare millions of empty cells.
+MAX_ARCHIVE_ENTRIES = 4_096
+MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 192 * 1024 * 1024
+# Excel cell values are limited to 32 767 characters; CSV has no such limit, so
+# cap it to keep a single field from exhausting memory.
+MAX_CSV_FIELD_CHARS = 1024 * 1024
 
 STRING, NUMBER, BOOLEAN, FORCE_STRING = 1, 2, 3, 4
 
@@ -145,15 +155,15 @@ def _style_from_cell(cell: Cell) -> dict[str, Any]:
     return style
 
 
-def _import_value(cell: Cell, cached: Any) -> dict[str, Any] | None:
+def _import_value(cell: Cell) -> dict[str, Any] | None:
     value = cell.value
     if isinstance(value, ArrayFormula):
         value = value.text
     if cell.data_type == "f" and isinstance(value, str) and value.startswith("="):
-        out: dict[str, Any] = {"f": value}
-        if cached is not None:
-            out.update(_plain_value(cached))
-        return out
+        # Cached values are not imported on purpose: reading them requires a second
+        # full workbook parse (memory and CPU), and Univer recalculates formulas on
+        # load. The formula string itself is preserved.
+        return {"f": value}
     if value is None:
         return None
     return _plain_value(value)
@@ -184,7 +194,7 @@ class _StyleRegistry:
 
 
 def _import_sheet(
-    ws: Worksheet, ws_values: Worksheet, registry: _StyleRegistry, budget: list[int]
+    ws: Worksheet, registry: _StyleRegistry, budget: list[int]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     sheet_id = _uid()
     cell_data: dict[str, dict[str, Any]] = {}
@@ -192,15 +202,16 @@ def _import_sheet(
         for cell in row:
             if not isinstance(cell, Cell):
                 continue
-            cached = ws_values.cell(cell.row, cell.column).value if cell.data_type == "f" else None
-            entry = _import_value(cell, cached) or {}
+            # Count every iterated cell, including empty ones: a sheet full of
+            # styled empty cells must hit the budget before it exhausts memory.
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise ConversionError(f"Too many cells, the limit is {MAX_CELLS}")
+            entry = _import_value(cell) or {}
             if cell.has_style and (style := _style_from_cell(cell)):
                 entry["s"] = registry.add(style)
             if not entry:
                 continue
-            budget[0] -= 1
-            if budget[0] < 0:
-                raise ConversionError(f"Too many cells, the limit is {MAX_CELLS}")
             cell_data.setdefault(str(cell.row - 1), {})[str(cell.column - 1)] = entry
 
     column_data: dict[str, Any] = {}
@@ -316,22 +327,71 @@ def _workbook_snapshot(
     }
 
 
+def _check_archive(data: bytes) -> None:
+    """Reject zip bombs and oversized workbooks before openpyxl allocates cells."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+    except zipfile.BadZipFile as exc:
+        raise ConversionError("File is not a valid XLSX workbook") from exc
+    if len(entries) > MAX_ARCHIVE_ENTRIES:
+        raise ConversionError("Workbook contains too many parts")
+    if "xl/workbook.xml" not in {entry.filename for entry in entries}:
+        raise ConversionError("File is not a valid XLSX workbook")
+    total = 0
+    for entry in entries:
+        if entry.file_size > MAX_ARCHIVE_ENTRY_BYTES:
+            raise ConversionError("Workbook part is too large")
+        total += entry.file_size
+        if total > MAX_ARCHIVE_BYTES:
+            raise ConversionError("Workbook is too large when unpacked")
+
+
+def _check_dimensions(data: bytes) -> None:
+    """Read worksheet dimensions in lazy mode; this does not build cell objects."""
+    try:
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as exc:  # openpyxl raises a variety of exceptions for bad files
+        raise ConversionError("File is not a valid XLSX workbook") from exc
+    try:
+        if len(wb.worksheets) > MAX_SHEETS:
+            raise ConversionError(f"Too many worksheets, the limit is {MAX_SHEETS}")
+        total = 0
+        for ws in wb.worksheets:
+            # A declared dimension can be inflated by the file; treating it as an
+            # upper bound rejects the file instead of trusting the contents.
+            total += max(ws.max_row or 0, 0) * max(ws.max_column or 0, 0)
+            if total > MAX_CELLS:
+                raise ConversionError(f"Too many cells, the limit is {MAX_CELLS}")
+    finally:
+        wb.close()
+
+
 def xlsx_to_snapshot(data: bytes, title: str) -> dict[str, Any]:
+    _check_archive(data)
+    _check_dimensions(data)
     try:
         wb = load_workbook(io.BytesIO(data), data_only=False)
-        wb_values = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as exc:  # openpyxl raises a variety of exceptions for bad files
         raise ConversionError("File is not a valid XLSX workbook") from exc
     registry = _StyleRegistry()
     budget = [MAX_CELLS]
     sheets, rules = [], {}
     for ws in wb.worksheets:
-        sheet, sheet_rules = _import_sheet(ws, wb_values[ws.title], registry, budget)
+        sheet, sheet_rules = _import_sheet(ws, registry, budget)
         sheets.append(sheet)
         if sheet_rules:
             rules[sheet["id"]] = sheet_rules
     if not sheets:
         raise ConversionError("Workbook has no worksheets")
+    has_formulas = any(
+        cell.get("f")
+        for sheet in sheets
+        for row in sheet["cellData"].values()
+        for cell in row.values()
+    )
+    if has_formulas:
+        _apply_cached_values(data, sheets)
     return _workbook_snapshot(title, sheets, registry.styles, rules)
 
 
@@ -354,6 +414,7 @@ def _parse_csv_value(raw: str) -> dict[str, Any] | None:
 
 
 def csv_to_snapshot(data: bytes, title: str) -> dict[str, Any]:
+    csv.field_size_limit(MAX_CSV_FIELD_CHARS)
     for encoding in ("utf-8-sig", "cp1251"):
         try:
             text = data.decode(encoding)
@@ -371,16 +432,20 @@ def csv_to_snapshot(data: bytes, title: str) -> dict[str, Any]:
     max_col = 0
     count = 0
     rows = 0
-    for r, row in enumerate(csv.reader(io.StringIO(text), dialect)):
-        rows = r + 1
-        for c, raw in enumerate(row):
-            if (value := _parse_csv_value(raw)) is None:
-                continue
-            count += 1
-            if count > MAX_CELLS:
-                raise ConversionError(f"Too many cells, the limit is {MAX_CELLS}")
-            cell_data.setdefault(str(r), {})[str(c)] = value
-            max_col = max(max_col, c + 1)
+    reader = csv.reader(io.StringIO(text), dialect)
+    try:
+        for r, row in enumerate(reader):
+            rows = r + 1
+            for c, raw in enumerate(row):
+                if (value := _parse_csv_value(raw)) is None:
+                    continue
+                count += 1
+                if count > MAX_CELLS:
+                    raise ConversionError(f"Too many cells, the limit is {MAX_CELLS}")
+                cell_data.setdefault(str(r), {})[str(c)] = value
+                max_col = max(max_col, c + 1)
+    except csv.Error as exc:
+        raise ConversionError(f"CSV cannot be parsed: {exc}") from exc
     sheet = {
         "id": _uid(),
         "name": "Лист1",
@@ -539,7 +604,57 @@ def _ordered_sheets(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return [sheets[s] for s in order]
 
 
+def _apply_cached_values(data: bytes, sheets: list[dict[str, Any]]) -> None:
+    """Fill stored values for formula cells from a lazy read-only pass.
+
+    The formula engine recalculates on load, but keeping the cached results makes
+    the imported sheet readable immediately and preserves values of functions the
+    client engine does not support.
+    """
+    by_name = {sheet["name"]: sheet for sheet in sheets}
+    try:
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        return
+    try:
+        for ws in wb.worksheets:
+            sheet = by_name.get(ws.title)
+            if sheet is None:
+                continue
+            cell_data = sheet["cellData"]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    entry = cell_data.get(str(cell.row - 1), {}).get(str(cell.column - 1))
+                    if entry is None or not entry.get("f"):
+                        continue
+                    value = _plain_value(cell.value)
+                    entry["v"] = value["v"]
+                    entry["t"] = value["t"]
+    finally:
+        wb.close()
+
+
+def _check_snapshot_cells(snapshot: dict[str, Any]) -> None:
+    """Bound export work: a client-supplied snapshot can be arbitrarily large."""
+    sheets = snapshot.get("sheets")
+    if not isinstance(sheets, dict):
+        raise ConversionError("Snapshot has no sheets")
+    total = 0
+    for sheet in sheets.values():
+        cell_data = (sheet or {}).get("cellData") or {}
+        if not isinstance(cell_data, dict):
+            raise ConversionError("Snapshot cell data is invalid")
+        for row in cell_data.values():
+            if isinstance(row, dict):
+                total += len(row)
+                if total > MAX_CELLS:
+                    raise ConversionError(f"Too many cells, the limit is {MAX_CELLS}")
+
+
 def snapshot_to_xlsx(snapshot: dict[str, Any]) -> bytes:
+    _check_snapshot_cells(snapshot)
     wb = XlWorkbook()
     wb.remove(wb.active)
     used: set[str] = set()
@@ -630,6 +745,7 @@ def _csv_safe(value: Any) -> Any:
 
 
 def snapshot_to_csv(snapshot: dict[str, Any], sheet_id: str | None = None) -> bytes:
+    _check_snapshot_cells(snapshot)
     sheets = _ordered_sheets(snapshot)
     sheet = next((s for s in sheets if s.get("id") == sheet_id), sheets[0])
     cell_data = sheet.get("cellData") or {}

@@ -1,3 +1,4 @@
+import logging
 import uuid
 from pathlib import PurePath
 from typing import Any, Literal
@@ -19,6 +20,7 @@ from app.services.xlsx import (
 )
 
 router = APIRouter(prefix="/workbooks", tags=["files"])
+log = logging.getLogger(__name__)
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -57,8 +59,16 @@ async def import_workbook(
             snapshot = await run_in_threadpool(csv_to_snapshot, data, title)
         else:
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Use .xlsx or .csv")
+    except HTTPException:
+        raise
     except ConversionError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    except Exception as exc:
+        # Malformed style / validation XML can surface as ValueError or KeyError.
+        log.exception("Failed to import %s", name)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "File cannot be imported"
+        ) from exc
     workbook = Workbook(
         workspace_id=workspace_id,
         title=title,

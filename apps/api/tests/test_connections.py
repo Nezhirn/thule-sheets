@@ -107,6 +107,10 @@ async def test_browse_and_page(client: httpx.AsyncClient, demo_db: None) -> None
         url, json={"filters": [{"column": "note", "op": "contains", "value": "%"}]}
     )
     assert r.json()["total"] == 0  # LIKE wildcards are escaped
+    r = await client.post(
+        url, json={"filters": [{"column": "note", "op": "ends_with", "value": "9"}]}
+    )
+    assert r.json()["total"] == 2  # "заказ 9" and "заказ 19"
 
     r = await client.post(url, json={"sort": [{"column": "id; DROP TABLE demo.orders"}]})
     assert r.status_code == 400

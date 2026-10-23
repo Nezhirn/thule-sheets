@@ -1,12 +1,20 @@
 import io
+import zipfile
 
 import httpx
+import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from app.services.templates import finance_workbook
-from app.services.xlsx import snapshot_to_csv, snapshot_to_xlsx, xlsx_to_snapshot
+from app.services.xlsx import (
+    ConversionError,
+    csv_to_snapshot,
+    snapshot_to_csv,
+    snapshot_to_xlsx,
+    xlsx_to_snapshot,
+)
 from tests.conftest import personal_workspace, register
 
 
@@ -77,6 +85,64 @@ def test_shared_formulas_are_expanded_on_export() -> None:
     }
     wb = load_workbook(io.BytesIO(snapshot_to_xlsx(snapshot)))
     assert wb["Обзор"]["B21"].value == "=C21*2"
+
+
+def _inflated_xlsx() -> bytes:
+    """A valid workbook whose declared sheet dimension exceeds the cell budget."""
+    source = io.BytesIO(_sample_xlsx())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(output, "w") as dst:
+        for entry in src.infolist():
+            data = src.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                data = (
+                    b'<?xml version="1.0" encoding="UTF-8"?>'
+                    b'<worksheet xmlns="http://schemas.openxmlformats.org/'
+                    b'spreadsheetml/2006/main"><dimension ref="A1:BJ60000"/>'
+                    b"<sheetData/></worksheet>"
+                )
+            dst.writestr(entry, data)
+    return output.getvalue()
+
+
+def test_xlsx_import_rejects_declared_cell_bomb() -> None:
+    with pytest.raises(ConversionError, match="Too many cells"):
+        xlsx_to_snapshot(_inflated_xlsx(), "bomb")
+
+
+def test_csv_import_rejects_oversized_field() -> None:
+    with pytest.raises(ConversionError, match="CSV cannot be parsed"):
+        csv_to_snapshot(b"a,b\n" + b"x" * (2 * 1024 * 1024) + b",1\n", "wide")
+
+
+def test_export_rejects_oversized_snapshot() -> None:
+    snapshot = finance_workbook("x")
+    sheet = snapshot["sheets"][snapshot["sheetOrder"][0]]
+    sheet["cellData"] = {
+        str(r): {str(c): {"v": 1, "t": 2} for c in range(20)} for r in range(30_000)
+    }
+    with pytest.raises(ConversionError, match="Too many cells"):
+        snapshot_to_xlsx(snapshot)
+    with pytest.raises(ConversionError, match="Too many cells"):
+        snapshot_to_csv(snapshot)
+
+
+def test_xlsx_import_keeps_cached_formula_values() -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws["B1"], ws["B2"], ws["B3"] = 1, 2, "=SUM(B1:B2)"
+    source = io.BytesIO()
+    wb.save(source)
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(output, "w") as dst:
+        for entry in src.infolist():
+            data = src.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                data = data.replace(b"<f>SUM(B1:B2)</f><v />", b"<f>SUM(B1:B2)</f><v>42</v>")
+            dst.writestr(entry, data)
+    snapshot = xlsx_to_snapshot(output.getvalue(), "cached")
+    cell = snapshot["sheets"][snapshot["sheetOrder"][0]]["cellData"]["2"]["1"]
+    assert cell == {"f": "=SUM(B1:B2)", "v": 42, "t": 2}
 
 
 def test_csv_export_neutralizes_formulas() -> None:

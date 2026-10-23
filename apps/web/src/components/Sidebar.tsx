@@ -149,7 +149,11 @@ export function Sidebar() {
           <MenuItem icon={<Database className="size-4" />} onSelect={() => navigate('/db')}>
             Подключения к БД
           </MenuItem>
-          <MenuItem icon={<LogOut className="size-4" />} onSelect={() => void logout().then(() => navigate('/login'))}>
+          <MenuItem
+            icon={<LogOut className="size-4" />}
+            // A full reload guarantees the auth query is gone before the login route renders.
+            onSelect={() => void logout().then(() => window.location.replace('/login'))}
+          >
             Выйти
           </MenuItem>
         </MenuContent>

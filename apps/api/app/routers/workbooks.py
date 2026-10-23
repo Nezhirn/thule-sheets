@@ -19,6 +19,7 @@ from app.deps import (
     require_workspace_role,
     user_from_token,
     workbook_role,
+    workspace_role,
 )
 from app.models import (
     ROLE_RANK,
@@ -338,6 +339,9 @@ async def save_snapshot(
     assert workbook is not None
     if data.rev > workbook.head_rev:
         raise HTTPException(status.HTTP_409_CONFLICT, "Revision is ahead of the server")
+    if data.rev < workbook.snapshot_rev:
+        # The client's state predates a stored snapshot; storing it would drop edits.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Snapshot is stale")
     if data.rev >= workbook.snapshot_rev:
         workbook.snapshot = data.snapshot
         workbook.snapshot_rev = data.rev
@@ -451,6 +455,18 @@ async def list_shares(
     workbook_id: uuid.UUID, user: CurrentUser, session: SessionDep
 ) -> list[ShareOut]:
     workbook, _ = await load_workbook(session, workbook_id, user, Role.viewer)
+    # An external sharee must not see the workspace roster; only their own row.
+    if await workspace_role(session, workbook.workspace_id, user.id) is None:
+        own = await session.scalar(
+            select(WorkbookShare.role).where(
+                WorkbookShare.workbook_id == workbook_id, WorkbookShare.user_id == user.id
+            )
+        )
+        if own is None:
+            return []
+        return [
+            ShareOut(user_id=user.id, email=user.email, name=user.name, role=own, source="share")
+        ]
     members = await session.execute(
         select(User, WorkspaceMember.role)
         .join(WorkspaceMember, WorkspaceMember.user_id == User.id)
@@ -476,7 +492,9 @@ async def list_shares(
 async def upsert_share(
     workbook_id: uuid.UUID, data: ShareIn, user: CurrentUser, session: SessionDep
 ) -> ShareOut:
-    await load_workbook(session, workbook_id, user, Role.editor)
+    workbook, _ = await load_workbook(session, workbook_id, user, Role.editor)
+    # Sharing is a workspace-level action: an external sharee cannot re-share.
+    await require_workspace_role(session, workbook.workspace_id, user, Role.editor)
     target = await session.scalar(select(User).where(User.email == data.email.lower()))
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
@@ -500,7 +518,8 @@ async def upsert_share(
 async def delete_share(
     workbook_id: uuid.UUID, user_id: uuid.UUID, user: CurrentUser, session: SessionDep
 ) -> None:
-    await load_workbook(session, workbook_id, user, Role.editor)
+    workbook, _ = await load_workbook(session, workbook_id, user, Role.editor)
+    await require_workspace_role(session, workbook.workspace_id, user, Role.editor)
     await session.execute(
         delete(WorkbookShare).where(
             WorkbookShare.workbook_id == workbook_id, WorkbookShare.user_id == user_id
@@ -539,13 +558,21 @@ def _valid_ops(ops: Any) -> TypeGuard[list[Any]]:
 
 async def _append_ops(
     workbook_id: uuid.UUID, user_id: uuid.UUID, client_id: str, op_id: str, ops: list[Any]
-) -> tuple[int, bool]:
-    """Append a batch and return (revision, created). A repeated op_id returns its revision."""
+) -> tuple[int, bool] | None:
+    """Append a batch and return (revision, created).
+
+    Returns None when the workbook is gone or the user has lost edit access; the
+    WebSocket role is re-checked here because a socket can outlive a share change.
+    """
     async with SessionLocal() as session:
         workbook = await session.scalar(
             select(Workbook).where(Workbook.id == workbook_id).with_for_update()
         )
-        assert workbook is not None
+        if workbook is None:
+            return None
+        role = await workbook_role(session, workbook, user_id)
+        if role is None or ROLE_RANK[role] < ROLE_RANK[Role.editor]:
+            return None
         existing = await session.scalar(
             select(WorkbookOp.rev).where(
                 WorkbookOp.workbook_id == workbook_id, WorkbookOp.op_id == op_id
@@ -620,7 +647,11 @@ async def workbook_socket(websocket: WebSocket, workbook_id: uuid.UUID) -> None:
                 if not _valid_ops(ops) or not isinstance(op_id, str) or not 0 < len(op_id) <= 64:
                     await peer.send({"type": "error", "message": "Invalid operations"})
                     continue
-                rev, created = await _append_ops(workbook_id, user.id, peer.client_id, op_id, ops)
+                appended = await _append_ops(workbook_id, user.id, peer.client_id, op_id, ops)
+                if appended is None:
+                    await peer.send({"type": "error", "message": "Read-only access"})
+                    return
+                rev, created = appended
                 await peer.send({"type": "ack", "opId": op_id, "rev": rev})
                 if not created:
                     continue

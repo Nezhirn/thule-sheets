@@ -158,9 +158,11 @@ export const commands = {
   numberFormat: (api: FUniver, pattern: string) => activeRange(api)?.setNumberFormat(pattern),
   addDecimal: (api: FUniver) => run(api, 'sheet.command.numfmt.add.decimal.command'),
   subtractDecimal: (api: FUniver) => run(api, 'sheet.command.numfmt.subtract.decimal.command'),
-  insertRowBefore: (api: FUniver) => run(api, 'sheet.command.insert-row-before'),
+  // The "before" commands require an explicit count; the "after" commands derive
+  // it from the selection.
+  insertRowBefore: (api: FUniver) => run(api, 'sheet.command.insert-row-before', { value: 1 }),
   insertRowAfter: (api: FUniver) => run(api, 'sheet.command.insert-row-after'),
-  insertColBefore: (api: FUniver) => run(api, 'sheet.command.insert-col-before'),
+  insertColBefore: (api: FUniver) => run(api, 'sheet.command.insert-col-before', { value: 1 }),
   insertColAfter: (api: FUniver) => run(api, 'sheet.command.insert-col-after'),
   removeRows: (api: FUniver) => run(api, 'sheet.command.remove-row-by-range'),
   removeCols: (api: FUniver) => run(api, 'sheet.command.remove-col-by-range'),

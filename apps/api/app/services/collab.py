@@ -91,7 +91,10 @@ class CollabHub:
         if not room:
             self.rooms.pop(workbook_id, None)
         if self.redis:
-            await self.redis.hdel(f"{PRESENCE_PREFIX}{workbook_id}", peer.client_id)
+            try:
+                await self.redis.hdel(f"{PRESENCE_PREFIX}{workbook_id}", peer.client_id)
+            except Exception:
+                log.warning("Failed to remove presence for %s", peer.client_id, exc_info=True)
         await self.publish(workbook_id, {"type": "leave", "clientId": peer.client_id})
 
     async def update_presence(self, workbook_id: uuid.UUID, peer: Peer, selection: Any) -> None:
@@ -105,8 +108,11 @@ class CollabHub:
 
     async def peers(self, workbook_id: uuid.UUID) -> list[dict[str, Any]]:
         if self.redis:
-            raw = await self.redis.hgetall(f"{PRESENCE_PREFIX}{workbook_id}")
-            return [json.loads(v) for v in raw.values()]
+            try:
+                raw = await self.redis.hgetall(f"{PRESENCE_PREFIX}{workbook_id}")
+                return [json.loads(v) for v in raw.values()]
+            except Exception:
+                log.warning("Redis presence read failed, using local peers", exc_info=True)
         return [p.info() for p in self.rooms.get(workbook_id, {}).values()]
 
     async def publish(
@@ -115,7 +121,14 @@ class CollabHub:
         await self._deliver(workbook_id, message, exclude)
         if self.redis:
             envelope = {"origin": self.instance_id, "exclude": exclude, "message": message}
-            await self.redis.publish(f"{CHANNEL_PREFIX}{workbook_id}", json.dumps(envelope))
+            try:
+                await self.redis.publish(
+                    f"{CHANNEL_PREFIX}{workbook_id}", json.dumps(envelope)
+                )
+            except Exception:
+                # Local delivery already happened; a Redis outage must not fail the
+                # request or drop the socket. Other instances miss this message.
+                log.warning("Redis publish failed", exc_info=True)
 
     async def _deliver(
         self, workbook_id: uuid.UUID, message: dict[str, Any], exclude: str | None
@@ -127,8 +140,11 @@ class CollabHub:
         if not self.redis:
             return
         key = f"{PRESENCE_PREFIX}{workbook_id}"
-        await self.redis.hset(key, peer.client_id, json.dumps(peer.info()))
-        await self.redis.expire(key, PRESENCE_TTL_SECONDS)
+        try:
+            await self.redis.hset(key, peer.client_id, json.dumps(peer.info()))
+            await self.redis.expire(key, PRESENCE_TTL_SECONDS)
+        except Exception:
+            log.warning("Redis presence write failed", exc_info=True)
 
     async def _listen(self) -> None:
         assert self.redis is not None

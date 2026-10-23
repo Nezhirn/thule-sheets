@@ -108,11 +108,20 @@ export function WorkbookPage() {
       }, 60);
     };
 
+    let presenceTimer: number | undefined;
+    let lastPresence = '';
     const subscriptions = [
       univerApi.addEvent(univerApi.Event.SelectionChanged, () => {
         setSelection(readSelection(univerApi));
         const range = univerApi.getActiveWorkbook()?.getActiveRange();
-        if (range) sync.current?.sendSelection({ sheet: range.getSheetName(), range: range.getA1Notation() });
+        if (!range) return;
+        const next = { sheet: range.getSheetName(), range: range.getA1Notation() };
+        const key = `${next.sheet}!${next.range}`;
+        if (key === lastPresence) return;
+        lastPresence = key;
+        // Drag-selection fires per frame; one presence message per 120 ms is enough.
+        window.clearTimeout(presenceTimer);
+        presenceTimer = window.setTimeout(() => sync.current?.sendSelection(next), 120);
       }),
       univerApi.addEvent(univerApi.Event.CommandExecuted, scheduleUi),
       univerApi.addEvent(univerApi.Event.ActiveSheetChanged, scheduleUi),
@@ -140,6 +149,10 @@ export function WorkbookPage() {
           await engine.catchUp();
           refreshUi(univerApi);
           toast(`Таблица обновлена: ${reason.toLowerCase()}`);
+        } catch (error) {
+          // Rethrow: the sync engine keeps the rebuild pending and retries with backoff.
+          toast(`Не удалось обновить таблицу: ${(error as Error).message}`, 'error');
+          throw error;
         } finally {
           setRebuilding(false);
         }
@@ -155,6 +168,7 @@ export function WorkbookPage() {
     return () => {
       cancelled = true;
       window.clearTimeout(uiTimer);
+      window.clearTimeout(presenceTimer);
       subscriptions.forEach((s) => s.dispose());
       engine.dispose();
       sync.current = null;
@@ -163,7 +177,10 @@ export function WorkbookPage() {
       window.setTimeout(() => h.dispose(), 0);
       handle.current = null;
     };
-  }, [detail.data, refreshUi, toast]);
+    // Re-boot only when another workbook is opened. Depending on the whole query
+    // object would tear down the editor on unrelated updates such as a favourite
+    // toggle (new object identity, same workbook).
+  }, [detail.data?.id, refreshUi, toast]);
 
   useEffect(() => {
     if (title) document.title = `${title} — Thule Sheets`;

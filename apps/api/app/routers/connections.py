@@ -266,7 +266,8 @@ async def delete_connection(
 async def test_saved_connection(
     connection_id: uuid.UUID, user: CurrentUser, session: SessionDep
 ) -> TestResult:
-    conn = await _get_connection(session, connection_id, user, Role.viewer)
+    # Opening outbound connections with stored credentials is an editor action.
+    conn = await _get_connection(session, connection_id, user, Role.editor)
     return await _test(params_from_model(conn))
 
 
@@ -458,7 +459,9 @@ async def run_query(
     row_limit = min(data.limit or limit or max_rows, max_rows)
     async with _acquire(conn) as db:
         try:
-            result = await catalog.run_query(db, data.sql, row_limit)
+            result = await catalog.run_query(
+                db, data.sql, row_limit, get_settings().db_query_byte_limit
+            )
         except Exception as exc:
             raise _db_error(exc) from exc
     await _audit(

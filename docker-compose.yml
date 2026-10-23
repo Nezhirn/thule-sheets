@@ -32,10 +32,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: thule-sheets
     env_file: .env
     environment:
       THULE_DATABASE_URL: postgresql+asyncpg://thule:${POSTGRES_PASSWORD:-thule}@postgres:5432/thule_sheets
-      THULE_REDIS_URL: redis://redis:6379/0
+      THULE_REDIS_URL: redis://redis:6379/3
     depends_on:
       postgres:
         condition: service_healthy

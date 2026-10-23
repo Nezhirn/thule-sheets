@@ -31,6 +31,7 @@ FilterOp = Literal[
     "contains",
     "not_contains",
     "starts_with",
+    "ends_with",
     "is_null",
     "not_null",
 ]
@@ -283,6 +284,9 @@ def _where(info: TableInfo, filters: list[FilterIn], params: _Params) -> str:
         elif f.op == "starts_with":
             p = params.add(f"{_escape_like(f.value)}%")
             clauses.append(f"{ident}::text ILIKE {p}")
+        elif f.op == "ends_with":
+            p = params.add(f"%{_escape_like(f.value)}")
+            clauses.append(f"{ident}::text ILIKE {p}")
         else:
             p = params.add(f.value)
             clauses.append(f"{ident} {COMPARISONS[f.op]} {_cast(p, col)}")
@@ -480,14 +484,38 @@ def to_json_value(value: Any) -> Any:
     return str(value)
 
 
-async def run_query(conn: asyncpg.Connection, sql: str, row_limit: int) -> dict[str, Any]:
+def _value_bytes(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value.encode("utf-8", "replace"))
+    if isinstance(value, bytes | bytearray | memoryview):
+        return len(value)
+    return 32
+
+
+async def run_query(
+    conn: asyncpg.Connection, sql: str, row_limit: int, byte_limit: int
+) -> dict[str, Any]:
+    records: list[asyncpg.Record] = []
+    used = 0
     async with conn.transaction(readonly=True):
         stmt = await conn.prepare(sql)
         columns = [{"name": a.name, "type": a.type.name} for a in stmt.get_attributes()]
         if not columns:
             raise CatalogError("The statement returns no rows; only queries are allowed here")
         cursor = await stmt.cursor()
-        records = await cursor.fetch(row_limit + 1)
+        # Stream instead of fetching everything: one huge value must not OOM the
+        # worker before the row limit is checked.
+        while len(records) <= row_limit:
+            batch = await cursor.fetch(200)
+            if not batch:
+                break
+            for record in batch:
+                used += sum(_value_bytes(value) for value in record.values())
+                if used > byte_limit:
+                    raise CatalogError("Query result is too large")
+                records.append(record)
+                if len(records) > row_limit:
+                    break
     truncated = len(records) > row_limit
     rows = [[to_json_value(v) for v in r.values()] for r in records[:row_limit]]
     return {"columns": columns, "rows": rows, "truncated": truncated}

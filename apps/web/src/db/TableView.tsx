@@ -32,7 +32,7 @@ const TEXT_OPS: Record<string, FilterOp> = {
   equals: 'eq',
   notEqual: 'neq',
   startsWith: 'starts_with',
-  endsWith: 'contains',
+  endsWith: 'ends_with',
   blank: 'is_null',
   notBlank: 'not_null',
 };
@@ -59,8 +59,13 @@ function toFilters(model: Record<string, Record<string, unknown>>, columns: DbCo
     const type = String(spec.type);
     const numeric = spec.filterType === 'number';
     if (numeric && type === 'inRange') {
-      filters.push({ column: column.name, op: 'gte', value: String(spec.filter) });
-      filters.push({ column: column.name, op: 'lte', value: String(spec.filterTo) });
+      // AG Grid emits null for an empty bound; sending "null" would be cast by Postgres.
+      if (spec.filter !== null && spec.filter !== undefined && spec.filter !== '') {
+        filters.push({ column: column.name, op: 'gte', value: String(spec.filter) });
+      }
+      if (spec.filterTo !== null && spec.filterTo !== undefined && spec.filterTo !== '') {
+        filters.push({ column: column.name, op: 'lte', value: String(spec.filterTo) });
+      }
       continue;
     }
     const op = (numeric ? NUMBER_OPS : TEXT_OPS)[type];
@@ -87,7 +92,8 @@ export function TableView({ connectionId, schema, table }: { connectionId: strin
     if (!meta) return [];
     const pk = new Set(meta.primary_key);
     return meta.columns.map((column, index) => {
-      const editable = meta.can_update && !pk.has(column.name) && !column.is_generated;
+      const editable =
+        meta.can_update && !pk.has(column.name) && !column.is_generated && !column.is_identity;
       const def: ColDef<Row> = {
         field: field(index),
         headerName: column.name,
@@ -122,10 +128,10 @@ export function TableView({ connectionId, schema, table }: { connectionId: strin
     if (!meta) return undefined;
     return {
       getRows: (params: IGetRowsParams) => {
-        const sort = params.sortModel.map((s) => ({
-          column: meta.columns[Number(s.colId.slice(1))].name,
-          desc: s.sort === 'desc',
-        }));
+        const sort = params.sortModel.flatMap((s) => {
+          const column = meta.columns[Number(s.colId.slice(1))];
+          return column ? [{ column: column.name, desc: s.sort === 'desc' }] : [];
+        });
         api
           .rows(connectionId, schema, table, {
             offset: params.startRow,

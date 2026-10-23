@@ -133,6 +133,7 @@ export type FilterOp =
   | 'contains'
   | 'not_contains'
   | 'starts_with'
+  | 'ends_with'
   | 'is_null'
   | 'not_null';
 
@@ -177,8 +178,14 @@ const FIELD_LABELS: Record<string, string> = {
   sql: 'SQL',
 };
 
+function plainText(value: string, status: number): string {
+  // A proxy error page is HTML; never paste it into a toast.
+  if (value.trimStart().startsWith('<')) return `Ошибка ${status}`;
+  return value.length > 300 ? `${value.slice(0, 300)}…` : value;
+}
+
 function errorMessage(status: number, detail: unknown): string {
-  if (typeof detail === 'string') return detail;
+  if (typeof detail === 'string') return plainText(detail, status);
   if (detail && typeof detail === 'object' && 'message' in detail) {
     return String((detail as { message: unknown }).message);
   }

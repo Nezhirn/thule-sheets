@@ -52,6 +52,9 @@ const FLUSH_DELAY_MS = 40;
 const SAVE_IDLE_MS = 2500;
 const GAP_TIMEOUT_MS = 1200;
 const PING_MS = 30_000;
+// The server rejects frames above 4 MB; stay well below it and cap by bytes,
+// not only by operation count (a single paste can be larger than 500 mutations).
+const MAX_BATCH_BYTES = 1_000_000;
 
 function isSyncable(id: string): boolean {
   if (!MUTATION_ID.test(id)) return false;
@@ -89,6 +92,8 @@ export class WorkbookSync {
   private saveTimer: number | undefined;
   private gapTimer: number | undefined;
   private pingTimer: number | undefined;
+  private rebuildTimer: number | undefined;
+  private rebuildDelay = 150;
   private reconnectDelay = 500;
   private lastSavedRev: number;
   private authoredSinceSave = false;
@@ -114,7 +119,14 @@ export class WorkbookSync {
 
   /** Apply the log tail after the snapshot, then go online. */
   async start(): Promise<void> {
-    await this.catchUp();
+    try {
+      await this.catchUp();
+    } catch (error) {
+      // Do not block the editor on a transient REST failure: the socket's hello
+      // handler repeats catch-up and the user can still read the snapshot.
+      console.warn('Initial catch-up failed', error);
+      this.cb.onSaved('error');
+    }
     this.listen();
     this.connect();
     const onUnload = () => this.saveOnExit();
@@ -152,10 +164,13 @@ export class WorkbookSync {
   }
 
   dispose(): void {
+    // SPA navigation does not fire pagehide: push queued operations out before close.
+    if (this.pending.length > 0 && this.ws?.readyState === WebSocket.OPEN) this.flush();
     this.disposed = true;
     window.clearTimeout(this.flushTimer);
     window.clearTimeout(this.saveTimer);
     window.clearTimeout(this.gapTimer);
+    window.clearTimeout(this.rebuildTimer);
     window.clearInterval(this.pingTimer);
     this.disposers.forEach((d) => d());
     this.ws?.close();
@@ -188,11 +203,34 @@ export class WorkbookSync {
   private flush(): void {
     if (this.inflight || this.pending.length === 0) return;
     if (this.ws?.readyState !== WebSocket.OPEN) return;
-    const batch: OwnBatch = { opId: crypto.randomUUID(), ops: this.pending.splice(0, 500) };
+    const batch: OwnBatch = { opId: crypto.randomUUID(), ops: this.takeBatch() };
+    if (batch.ops.length === 0) return;
     this.inflight = batch;
     this.unordered.push(batch.ops);
     this.cb.onSaved('saving');
     this.send({ type: 'ops', opId: batch.opId, baseRev: this.rev, ops: batch.ops });
+  }
+
+  /** Take operations up to the count and serialized-size budget. */
+  private takeBatch(): Mutation[] {
+    const batch: Mutation[] = [];
+    let bytes = 0;
+    while (batch.length < 500 && this.pending.length > 0) {
+      const next = this.pending[0];
+      const size = JSON.stringify(next).length;
+      if (size > MAX_BATCH_BYTES) {
+        // A single mutation beyond the server frame limit can never be sent.
+        this.pending.shift();
+        console.warn('Dropping oversized mutation', next.id, size);
+        this.cb.onSaved('error');
+        continue;
+      }
+      if (batch.length > 0 && bytes + size > MAX_BATCH_BYTES) break;
+      this.pending.shift();
+      batch.push(next);
+      bytes += size;
+    }
+    return batch;
   }
 
   private resendInflight(): void {
@@ -232,6 +270,8 @@ export class WorkbookSync {
       const own = this.ownAhead.get(next);
       if (own) {
         this.ownAhead.delete(next);
+        // catchUp() may also have queued our own batch as remote; drop it too.
+        this.remoteAhead.delete(next);
         this.unordered.shift();
         this.rev = next;
         continue;
@@ -244,7 +284,10 @@ export class WorkbookSync {
         this.requestRebuild('Версия восстановлена');
         return;
       }
-      this.applyRemote(remote);
+      if (!this.applyRemote(remote)) {
+        this.requestRebuild('Не удалось применить изменение');
+        return;
+      }
     }
     window.clearTimeout(this.gapTimer);
     if (this.remoteAhead.size > 0) {
@@ -256,34 +299,43 @@ export class WorkbookSync {
     }
   }
 
-  private applyRemote(ops: Mutation[]): void {
+  private applyRemote(ops: Mutation[]): boolean {
     const localUnder = [...this.unordered, this.pending];
     const conflicts = localUnder.some((batch) => batch.length > 0);
     if (conflicts) {
       const allAbsolute = [...ops, ...localUnder.flat()].every((m) => ABSOLUTE.has(m.id));
       if (!allAbsolute) {
         this.requestRebuild('Одновременное изменение структуры');
-        return;
+        return false;
       }
     }
-    this.execute(ops);
+    if (!this.execute(ops)) return false;
     if (conflicts) {
       // Local edits are ordered after this batch on the server: replay them on top.
-      for (const batch of localUnder) this.execute(batch);
+      for (const batch of localUnder) if (!this.execute(batch)) return false;
     }
+    return true;
   }
 
-  private execute(ops: Mutation[]): void {
+  private execute(ops: Mutation[]): boolean {
     this.applyingRemote = true;
     try {
       for (const op of ops) {
         try {
           // fromCollab (not onlyLocal): the formula engine must see peer edits to recalculate.
-          this.api.syncExecuteCommand(op.id, op.params as object, { fromCollab: true });
+          const applied = this.api.syncExecuteCommand(op.id, op.params as object, {
+            fromCollab: true,
+          });
+          if (applied === false) {
+            console.warn('Mutation returned false', op.id);
+            return false;
+          }
         } catch (error) {
           console.warn('Failed to apply mutation', op.id, error);
+          return false;
         }
       }
+      return true;
     } finally {
       this.applyingRemote = false;
     }
@@ -292,17 +344,28 @@ export class WorkbookSync {
   private requestRebuild(reason: string): void {
     if (this.needsRebuild) return;
     this.needsRebuild = reason;
-    // Let own batches reach the server first so the log contains them.
-    const tryRebuild = () => {
-      if (this.disposed) return;
-      if (this.inflight || this.pending.length) {
-        this.flush();
-        window.setTimeout(tryRebuild, 150);
-        return;
-      }
-      void this.cb.onRebuild(reason);
-    };
-    tryRebuild();
+    this.rebuildDelay = 150;
+    this.tryRebuild();
+  }
+
+  private tryRebuild(): void {
+    if (this.disposed || !this.needsRebuild) return;
+    window.clearTimeout(this.rebuildTimer);
+    // Offline: the hello handler resumes the rebuild once the socket is back.
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.inflight || this.pending.length) {
+      // Let own batches reach the server first so the log contains them.
+      this.flush();
+      this.rebuildTimer = window.setTimeout(() => this.tryRebuild(), this.rebuildDelay);
+      this.rebuildDelay = Math.min(this.rebuildDelay * 2, 2000);
+      return;
+    }
+    void this.cb.onRebuild(this.needsRebuild).catch((error) => {
+      // Keep needsRebuild set and retry with backoff: the snapshot is authoritative.
+      console.warn('Rebuild failed', error);
+      this.rebuildTimer = window.setTimeout(() => this.tryRebuild(), this.rebuildDelay);
+      this.rebuildDelay = Math.min(this.rebuildDelay * 2, 5000);
+    });
   }
 
   // ------------------------------------------------------------- snapshots
@@ -330,8 +393,11 @@ export class WorkbookSync {
       this.lastSavedRev = rev;
       if (this.rev === rev && !this.pending.length) this.authoredSinceSave = false;
       this.cb.onSaved('saved');
-    } catch {
+    } catch (error) {
       this.cb.onSaved('error');
+      // 409 means another client stored a newer snapshot while this one was open:
+      // rebuild from the server instead of retrying a snapshot that can never land.
+      if ((error as { status?: number }).status === 409) this.requestRebuild('Снапшот устарел');
     }
   }
 
@@ -339,12 +405,16 @@ export class WorkbookSync {
     if (!this.authoredSinceSave || this.inflight || this.pending.length || this.unordered.length) return;
     const snapshot = this.snapshot();
     if (!snapshot) return;
+    const body = JSON.stringify({ rev: this.rev, snapshot });
+    // Browsers reject keepalive bodies above ~64 KB; operations are already on the
+    // server, so skip the optional snapshot instead of failing silently.
+    if (body.length > 60_000) return;
     void fetch(`/api/workbooks/${this.workbookId}/snapshot`, {
       method: 'PUT',
       keepalive: true,
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rev: this.rev, snapshot }),
+      body,
     }).catch(() => undefined);
   }
 
@@ -385,7 +455,16 @@ export class WorkbookSync {
         this.peers = new Map((message.peers as Peer[]).map((p) => [p.clientId, p]));
         this.emitPeers();
         this.cb.onStatus('online');
-        void this.catchUp().then(() => this.resendInflight());
+        void this.catchUp()
+          .then(() => {
+            this.resendInflight();
+            if (this.needsRebuild) this.tryRebuild();
+          })
+          .catch((error) => {
+            console.warn('Catch-up after reconnect failed', error);
+            // Still resend our batch: the server dedupes by opId.
+            this.resendInflight();
+          });
         break;
       }
       case 'ack':
@@ -413,9 +492,26 @@ export class WorkbookSync {
       case 'meta':
         this.cb.onTitle(String(message.title));
         break;
-      case 'error':
+      case 'error': {
         console.warn('Sync error:', message.message);
+        const rejected = String(message.message);
+        // A rejected batch stays in flight forever unless it is cleared here;
+        // flush() would then never send anything again.
+        if (this.inflight) {
+          this.inflight = null;
+          this.unordered.pop();
+        }
+        if (rejected === 'Read-only access') {
+          this.canEdit = false;
+          this.pending = [];
+          this.cb.onRole('viewer');
+          this.requestRebuild('Доступ только для чтения');
+        } else {
+          this.cb.onSaved('error');
+          this.requestRebuild('Изменения отклонены сервером');
+        }
         break;
+      }
     }
   }
 
