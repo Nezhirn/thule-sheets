@@ -64,8 +64,8 @@ async def import_workbook(
         title=title,
         created_by=user.id,
         snapshot=snapshot,
-        head_rev=0,
-        snapshot_rev=0,
+        rev=0,
+        saved_by=user.id,
     )
     session.add(workbook)
     await session.commit()

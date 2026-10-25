@@ -127,12 +127,23 @@ export function Spinner({ className }: { className?: string }) {
   return <Loader2 className={clsx('size-4 animate-spin text-fg-muted', className)} />;
 }
 
-export function Tooltip({ label, children }: { label: ReactNode; children: ReactNode }) {
+export function Tooltip({
+  label,
+  children,
+  side,
+  delay = 450,
+}: {
+  label: ReactNode;
+  children: ReactNode;
+  side?: 'top' | 'right' | 'bottom' | 'left';
+  delay?: number;
+}) {
   return (
-    <RTooltip.Root delayDuration={450}>
+    <RTooltip.Root delayDuration={delay}>
       <RTooltip.Trigger asChild>{children}</RTooltip.Trigger>
       <RTooltip.Portal>
         <RTooltip.Content
+          side={side}
           sideOffset={6}
           className="z-50 rounded-md bg-[#2a2a36] px-2 py-1 text-[12px] text-fg shadow-lg hairline"
         >
@@ -192,13 +203,23 @@ export function Dialog({
 export const Menu = DropdownMenu.Root;
 export const MenuTrigger = DropdownMenu.Trigger;
 
-export function MenuContent({ children, align = 'start' }: { children: ReactNode; align?: 'start' | 'end' }) {
+export function MenuContent({
+  children,
+  align = 'start',
+  side,
+}: {
+  children: ReactNode;
+  align?: 'start' | 'end';
+  side?: 'top' | 'right' | 'bottom' | 'left';
+}) {
   return (
     <DropdownMenu.Portal>
       <DropdownMenu.Content
         align={align}
+        side={side}
         sideOffset={6}
-        className="glass z-50 min-w-[220px] rounded-xl p-1.5 text-[13px] shadow-2xl hairline"
+        collisionPadding={8}
+        className="glass z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-[220px] !bg-[rgb(26_26_34/0.97)] overflow-y-auto rounded-xl p-1.5 text-[13px] shadow-2xl hairline"
       >
         {children}
       </DropdownMenu.Content>

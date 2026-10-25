@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Tooltip } from 'radix-ui';
 import { lazy, StrictMode, Suspense, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router';
+import { createBrowserRouter, createRoutesFromElements, Navigate, Outlet, Route, RouterProvider } from 'react-router';
 
 import { Sidebar } from './components/Sidebar';
 import { Spinner, ToastProvider } from './components/ui';
@@ -34,7 +34,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
 function Shell() {
   return (
     <RequireAuth>
-      <div className="relative flex h-full gap-4 p-4">
+      <div className="relative flex h-full gap-2 p-2">
         <Sidebar />
         <Suspense
           fallback={
@@ -50,29 +50,34 @@ function Shell() {
   );
 }
 
+// A data router is required for useBlocker (unsaved-changes guard in the editor).
+const router = createBrowserRouter(
+  createRoutesFromElements(
+    <>
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<Shell />}>
+        <Route index element={<HomePage view="all" />} />
+        <Route path="recent" element={<HomePage key="recent" view="recent" />} />
+        <Route path="favorites" element={<HomePage key="favorites" view="favorites" />} />
+        <Route path="shared" element={<HomePage key="shared" view="shared" />} />
+        <Route path="w/:workspaceId" element={<HomePage view="all" />} />
+        <Route path="book/:id" element={<WorkbookPage />} />
+        <Route path="db" element={<DatabasePage />} />
+        <Route path="db/:connectionId" element={<DatabasePage />} />
+        <Route path="db/:connectionId/t/:schema/:table" element={<DatabasePage />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </>,
+  ),
+);
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <Tooltip.Provider>
         <ToastProvider>
           <AuthProvider>
-            <BrowserRouter>
-              <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                <Route element={<Shell />}>
-                  <Route index element={<HomePage view="all" />} />
-                  <Route path="recent" element={<HomePage key="recent" view="recent" />} />
-                  <Route path="favorites" element={<HomePage key="favorites" view="favorites" />} />
-                  <Route path="shared" element={<HomePage key="shared" view="shared" />} />
-                  <Route path="w/:workspaceId" element={<HomePage view="all" />} />
-                  <Route path="book/:id" element={<WorkbookPage />} />
-                  <Route path="db" element={<DatabasePage />} />
-                  <Route path="db/:connectionId" element={<DatabasePage />} />
-                  <Route path="db/:connectionId/t/:schema/:table" element={<DatabasePage />} />
-                </Route>
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </BrowserRouter>
+            <RouterProvider router={router} />
           </AuthProvider>
         </ToastProvider>
       </Tooltip.Provider>

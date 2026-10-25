@@ -88,6 +88,12 @@ class DeleteRowsIn(BaseModel):
     keys: list[dict[str, str | None]] = Field(min_length=1, max_length=500)
 
 
+class ApplyChangesIn(BaseModel):
+    updates: list[catalog.RowChange] = Field(default_factory=list, max_length=5000)
+    inserts: list[catalog.RowInsert] = Field(default_factory=list, max_length=5000)
+    deletes: list[catalog.RowDelete] = Field(default_factory=list, max_length=5000)
+
+
 class QueryIn(BaseModel):
     sql: str = Field(min_length=1, max_length=100_000)
     limit: int | None = Field(default=None, ge=1)
@@ -109,8 +115,12 @@ def _out(conn: DbConnection) -> ConnectionOut:
 
 
 def _db_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, catalog.ChangeFailed):
+        inner = _db_error(exc.cause)
+        detail = inner.detail if isinstance(inner.detail, dict) else {"message": inner.detail}
+        return HTTPException(inner.status_code, {**detail, "op": exc.op, "index": exc.index})
     if isinstance(exc, catalog.EditConflict):
-        return HTTPException(status.HTTP_409_CONFLICT, str(exc))
+        return HTTPException(status.HTTP_409_CONFLICT, {"message": str(exc), "pk": exc.pk})
     if isinstance(exc, catalog.CatalogError | ConnectionConfigError):
         return HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     if isinstance(exc, asyncpg.QueryCanceledError):
@@ -414,6 +424,44 @@ async def insert_row(
         {"schema": schema, "table": table, "columns": sorted(data.values)},
     )
     return {"row": row}
+
+
+@router.post("/{connection_id}/schemas/{schema}/tables/{table}/rows/apply")
+async def apply_changes(
+    connection_id: uuid.UUID,
+    schema: str,
+    table: str,
+    data: ApplyChangesIn,
+    user: CurrentUser,
+    session: SessionDep,
+) -> dict[str, Any]:
+    """Save edits made in the table editor: updates, deletes and inserts in one transaction."""
+    if not (data.updates or data.inserts or data.deletes):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "No changes")
+    conn = await _writable(session, connection_id, user)
+    async with _acquire(conn) as db:
+        try:
+            info = await catalog.table_info(db, schema, table)
+            result = await catalog.apply_changes(db, info, data.updates, data.inserts, data.deletes)
+        except Exception as exc:
+            raise _db_error(exc) from exc
+    await _audit(
+        session,
+        user,
+        "db.apply",
+        conn,
+        {
+            "schema": schema,
+            "table": table,
+            "updated": len(data.updates),
+            "inserted": len(data.inserts),
+            "deleted": result["deleted"],
+            "update_keys": [c.pk for c in data.updates][:50],
+            "delete_keys": [d.pk for d in data.deletes[:50]],
+            "columns": sorted({k for c in data.updates for k in c.values}),
+        },
+    )
+    return result
 
 
 @router.post("/{connection_id}/schemas/{schema}/tables/{table}/rows/delete")

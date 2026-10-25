@@ -18,6 +18,8 @@ import sortRU from '@univerjs/preset-sheets-sort/locales/ru-RU';
 import { createUniver, defaultTheme, type FUniver } from '@univerjs/presets';
 import { CalculationMode } from '@univerjs/sheets-formula';
 
+import { isInverted } from './inversion';
+
 import '@univerjs/preset-sheets-core/lib/index.css';
 import '@univerjs/preset-sheets-conditional-formatting/lib/index.css';
 import '@univerjs/preset-sheets-data-validation/lib/index.css';
@@ -36,7 +38,14 @@ export interface UniverHandle {
   dispose: () => void;
 }
 
-export function bootUniver(container: HTMLElement): UniverHandle {
+export interface BootOptions {
+  /** Univer's own context menu (insert/delete rows, formatting). Off for database tables. */
+  contextMenu?: boolean;
+  /** Green "number stored as text" marks. Off for database tables, where text is intended. */
+  textFormatMarks?: boolean;
+}
+
+export function bootUniver(container: HTMLElement, options: BootOptions = {}): UniverHandle {
   const { univer, univerAPI } = createUniver({
     locale: LocaleType.RU_RU,
     locales: {
@@ -44,7 +53,8 @@ export function bootUniver(container: HTMLElement): UniverHandle {
     },
     theme,
     // Dark mode inverts canvas colors, so snapshots keep "light" colors and export as-is.
-    darkMode: true,
+    // The user can switch inversion off (see inversion.ts).
+    darkMode: isInverted(),
     presets: [
       UniverSheetsCorePreset({
         container,
@@ -52,7 +62,9 @@ export function bootUniver(container: HTMLElement): UniverHandle {
         toolbar: false,
         formulaBar: false,
         footer: false,
-        contextMenu: true,
+        contextMenu: options.contextMenu ?? true,
+        disableTextFormatMark: options.textFormatMarks === false,
+        disableTextFormatAlert: options.textFormatMarks === false,
         formula: {
           // Snapshots carry cached values; force a pass so the dependency graph is built.
           initialFormulaComputing: CalculationMode.FORCED,

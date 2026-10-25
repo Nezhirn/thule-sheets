@@ -1,25 +1,14 @@
-import json
-import re
-import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypeGuard
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
-from app.db import SessionLocal
-from app.deps import (
-    CurrentUser,
-    SessionDep,
-    load_workbook,
-    require_workspace_role,
-    user_from_token,
-    workbook_role,
-)
+from app.deps import CurrentUser, SessionDep, load_workbook, require_workspace_role
 from app.models import (
     ROLE_RANK,
     Favorite,
@@ -27,22 +16,16 @@ from app.models import (
     Role,
     User,
     Workbook,
-    WorkbookOp,
     WorkbookShare,
     WorkbookVersion,
     Workspace,
     WorkspaceMember,
 )
-from app.services.collab import Peer, hub
 from app.services.templates import TEMPLATES
 
 router = APIRouter(prefix="/workbooks", tags=["workbooks"])
 
 AUTO_VERSION_INTERVAL = timedelta(minutes=30)
-MAX_OPS_MESSAGE_BYTES = 4 * 1024 * 1024
-# Univer mutation ids look like "sheet.mutation.set-range-values" or
-# "data-validation.mutation.updateRule". Only mutations are relayed to peers.
-MUTATION_ID = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.mutation\.[A-Za-z0-9_.-]+$")
 
 
 class WorkbookItem(BaseModel):
@@ -75,27 +58,25 @@ class WorkbookOut(BaseModel):
     workspace_name: str
     role: Role
     favorite: bool
-    head_rev: int
-    snapshot_rev: int
+    rev: int
+    saved_at: datetime
+    saved_by: str | None
+    saved_by_id: uuid.UUID | None
     snapshot: dict[str, Any]
     updated_at: datetime
 
 
-class SnapshotIn(BaseModel):
-    rev: int = Field(ge=0)
+class SaveIn(BaseModel):
+    # Revision the client's copy was loaded from. A mismatch means someone saved in between.
+    base_rev: int = Field(ge=0)
     snapshot: dict[str, Any]
+    # Overwrite a newer revision after the user confirmed it.
+    force: bool = False
 
 
-class SnapshotOut(BaseModel):
-    snapshot_rev: int
-    head_rev: int
-
-
-class OpsOut(BaseModel):
+class SaveOut(BaseModel):
     rev: int
-    client_id: str
-    op_id: str | None
-    ops: list[Any]
+    saved_at: datetime
 
 
 class ShareIn(BaseModel):
@@ -219,8 +200,8 @@ async def create_workbook(
         title=title,
         created_by=user.id,
         snapshot=make_snapshot(title),
-        head_rev=0,
-        snapshot_rev=0,
+        rev=0,
+        saved_by=user.id,
     )
     session.add(workbook)
     await session.commit()
@@ -232,6 +213,7 @@ async def _workbook_out(
 ) -> WorkbookOut:
     workspace = await session.get_one(Workspace, workbook.workspace_id)
     favorite = await session.get(Favorite, (user.id, workbook.id)) is not None
+    saved_by = await session.get(User, workbook.saved_by) if workbook.saved_by else None
     return WorkbookOut(
         id=workbook.id,
         title=workbook.title,
@@ -239,8 +221,10 @@ async def _workbook_out(
         workspace_name=workspace.name,
         role=role,
         favorite=favorite,
-        head_rev=workbook.head_rev,
-        snapshot_rev=workbook.snapshot_rev,
+        rev=workbook.rev,
+        saved_at=workbook.saved_at,
+        saved_by=saved_by.name if saved_by else None,
+        saved_by_id=workbook.saved_by,
         snapshot=workbook.snapshot,
         updated_at=workbook.updated_at,
     )
@@ -276,7 +260,6 @@ async def update_workbook(
         await require_workspace_role(session, data.workspace_id, user, Role.editor)
         workbook.workspace_id = data.workspace_id
     await session.commit()
-    await hub.publish(workbook.id, {"type": "meta", "title": workbook.title})
     return await _workbook_out(session, workbook, role, user)
 
 
@@ -310,54 +293,63 @@ async def remove_favorite(workbook_id: uuid.UUID, user: CurrentUser, session: Se
 # ---------------------------------------------------------------- content
 
 
-@router.get("/{workbook_id}/ops")
-async def get_ops(
-    workbook_id: uuid.UUID,
-    user: CurrentUser,
-    session: SessionDep,
-    since: int = Query(ge=0),
-) -> list[OpsOut]:
-    await load_workbook(session, workbook_id, user, Role.viewer)
-    rows = await session.scalars(
-        select(WorkbookOp)
-        .where(WorkbookOp.workbook_id == workbook_id, WorkbookOp.rev > since)
-        .order_by(WorkbookOp.rev)
+async def _lock_workbook(session: AsyncSession, workbook_id: uuid.UUID) -> Workbook:
+    """Lock the workbook row and return it with the committed values.
+
+    populate_existing: the object may already be in the session (loaded by the access
+    check), and the ORM would otherwise keep its pre-lock attributes, including `rev`.
+    """
+    workbook = await session.scalar(
+        select(Workbook)
+        .where(Workbook.id == workbook_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
-    return [OpsOut(rev=r.rev, client_id=r.client_id, op_id=r.op_id, ops=r.ops) for r in rows]
+    assert workbook is not None
+    return workbook
 
 
 @router.put("/{workbook_id}/snapshot")
 async def save_snapshot(
-    workbook_id: uuid.UUID, data: SnapshotIn, user: CurrentUser, session: SessionDep
-) -> SnapshotOut:
-    """Store a full snapshot produced by a client whose state reflects revision `rev`."""
+    workbook_id: uuid.UUID, data: SaveIn, user: CurrentUser, session: SessionDep
+) -> SaveOut:
+    """Store the client's workbook. Content on the server changes only through this call."""
     await load_workbook(session, workbook_id, user, Role.editor)
-    workbook = await session.scalar(
-        select(Workbook).where(Workbook.id == workbook_id).with_for_update()
+    workbook = await _lock_workbook(session, workbook_id)
+    if data.base_rev != workbook.rev and not data.force:
+        saved_by = await session.get(User, workbook.saved_by) if workbook.saved_by else None
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "message": "The workbook was saved by someone else",
+                "rev": workbook.rev,
+                "saved_at": workbook.saved_at.isoformat(),
+                "saved_by": saved_by.name if saved_by else None,
+                "saved_by_id": str(workbook.saved_by) if workbook.saved_by else None,
+            },
+        )
+    now = datetime.now(UTC)
+    workbook.snapshot = data.snapshot
+    workbook.rev += 1
+    workbook.saved_at = now
+    workbook.saved_by = user.id
+    workbook.updated_at = now
+    last_version = await session.scalar(
+        select(func.max(WorkbookVersion.created_at)).where(
+            WorkbookVersion.workbook_id == workbook_id
+        )
     )
-    assert workbook is not None
-    if data.rev > workbook.head_rev:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Revision is ahead of the server")
-    if data.rev >= workbook.snapshot_rev:
-        workbook.snapshot = data.snapshot
-        workbook.snapshot_rev = data.rev
-        workbook.updated_at = datetime.now(UTC)
-        last_version = await session.scalar(
-            select(func.max(WorkbookVersion.created_at)).where(
-                WorkbookVersion.workbook_id == workbook_id
+    if last_version is None or now - last_version > AUTO_VERSION_INTERVAL:
+        session.add(
+            WorkbookVersion(
+                workbook_id=workbook_id,
+                rev=workbook.rev,
+                snapshot=data.snapshot,
+                created_by=user.id,
             )
         )
-        if last_version is None or datetime.now(UTC) - last_version > AUTO_VERSION_INTERVAL:
-            session.add(
-                WorkbookVersion(
-                    workbook_id=workbook_id,
-                    rev=data.rev,
-                    snapshot=data.snapshot,
-                    created_by=user.id,
-                )
-            )
     await session.commit()
-    return SnapshotOut(snapshot_rev=workbook.snapshot_rev, head_rev=workbook.head_rev)
+    return SaveOut(rev=workbook.rev, saved_at=workbook.saved_at)
 
 
 # ---------------------------------------------------------------- versions
@@ -388,7 +380,7 @@ async def create_version(
     workbook, _ = await load_workbook(session, workbook_id, user, Role.editor)
     version = WorkbookVersion(
         workbook_id=workbook_id,
-        rev=workbook.snapshot_rev,
+        rev=workbook.rev,
         label=data.label,
         snapshot=workbook.snapshot,
         created_by=user.id,
@@ -407,40 +399,30 @@ async def create_version(
 @router.post("/{workbook_id}/versions/{version_id}/restore")
 async def restore_version(
     workbook_id: uuid.UUID, version_id: uuid.UUID, user: CurrentUser, session: SessionDep
-) -> SnapshotOut:
+) -> SaveOut:
     await load_workbook(session, workbook_id, user, Role.editor)
     version = await session.get(WorkbookVersion, version_id)
     if version is None or version.workbook_id != workbook_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Version not found")
-    workbook = await session.scalar(
-        select(Workbook).where(Workbook.id == workbook_id).with_for_update()
-    )
-    assert workbook is not None
-    # Keep the current state as a version, then reset to the selected one.
+    workbook = await _lock_workbook(session, workbook_id)
+    # Keep the current state as a version, then replace it with the selected one.
     session.add(
         WorkbookVersion(
             workbook_id=workbook_id,
-            rev=workbook.snapshot_rev,
+            rev=workbook.rev,
             snapshot=workbook.snapshot,
             label="Перед восстановлением",
             created_by=user.id,
         )
     )
-    workbook.head_rev += 1
+    now = datetime.now(UTC)
     workbook.snapshot = version.snapshot
-    workbook.snapshot_rev = workbook.head_rev
-    session.add(
-        WorkbookOp(
-            workbook_id=workbook_id,
-            rev=workbook.head_rev,
-            user_id=user.id,
-            client_id="server",
-            ops=[{"reset": True}],
-        )
-    )
+    workbook.rev += 1
+    workbook.saved_at = now
+    workbook.saved_by = user.id
+    workbook.updated_at = now
     await session.commit()
-    await hub.publish(workbook_id, {"type": "reset", "rev": workbook.head_rev})
-    return SnapshotOut(snapshot_rev=workbook.snapshot_rev, head_rev=workbook.head_rev)
+    return SaveOut(rev=workbook.rev, saved_at=workbook.saved_at)
 
 
 # ---------------------------------------------------------------- sharing
@@ -507,148 +489,3 @@ async def delete_share(
         )
     )
     await session.commit()
-
-
-# ---------------------------------------------------------------- realtime
-
-
-def _origin_allowed(websocket: WebSocket) -> bool:
-    """Reject cross-site WebSocket hijacking: cookies are sent with any origin."""
-    origin = websocket.headers.get("origin")
-    if origin is None:
-        return True  # non-browser clients
-    host = websocket.headers.get("host", "")
-    return origin.split("://", 1)[-1] == host
-
-
-def _valid_ops(ops: Any) -> TypeGuard[list[Any]]:
-    return (
-        isinstance(ops, list)
-        and 0 < len(ops) <= 500
-        and all(
-            isinstance(op, dict)
-            and isinstance(op.get("id"), str)
-            and MUTATION_ID.match(op["id"])
-            # doc.* mutations come from the in-cell editor document, not the workbook
-            and not op["id"].startswith("doc.")
-            and isinstance(op.get("params"), dict | None)
-            for op in ops
-        )
-    )
-
-
-async def _append_ops(
-    workbook_id: uuid.UUID, user_id: uuid.UUID, client_id: str, op_id: str, ops: list[Any]
-) -> tuple[int, bool]:
-    """Append a batch and return (revision, created). A repeated op_id returns its revision."""
-    async with SessionLocal() as session:
-        workbook = await session.scalar(
-            select(Workbook).where(Workbook.id == workbook_id).with_for_update()
-        )
-        assert workbook is not None
-        existing = await session.scalar(
-            select(WorkbookOp.rev).where(
-                WorkbookOp.workbook_id == workbook_id, WorkbookOp.op_id == op_id
-            )
-        )
-        if existing is not None:
-            return existing, False
-        workbook.head_rev += 1
-        workbook.updated_at = datetime.now(UTC)
-        session.add(
-            WorkbookOp(
-                workbook_id=workbook_id,
-                rev=workbook.head_rev,
-                user_id=user_id,
-                client_id=client_id,
-                op_id=op_id,
-                ops=ops,
-            )
-        )
-        await session.commit()
-        return workbook.head_rev, True
-
-
-@router.websocket("/{workbook_id}/ws")
-async def workbook_socket(websocket: WebSocket, workbook_id: uuid.UUID) -> None:
-    if not _origin_allowed(websocket):
-        await websocket.close(code=4403)
-        return
-    async with SessionLocal() as session:
-        user = await user_from_token(session, websocket.cookies.get(get_settings().cookie_name))
-        workbook = await session.get(Workbook, workbook_id) if user else None
-        role = await workbook_role(session, workbook, user.id) if workbook and user else None
-        head_rev = workbook.head_rev if workbook else 0
-    if user is None or role is None:
-        await websocket.close(code=4401)
-        return
-
-    await websocket.accept()
-    peer = Peer(
-        websocket=websocket,
-        client_id=secrets.token_hex(8),
-        user_id=user.id,
-        name=user.name,
-        color=hub.color_for(user.id),
-        role=role.value,
-    )
-    peers = await hub.join(workbook_id, peer)
-    await peer.send(
-        {
-            "type": "hello",
-            "clientId": peer.client_id,
-            "rev": head_rev,
-            "role": role.value,
-            "peers": peers,
-        }
-    )
-    can_edit = ROLE_RANK[role] >= ROLE_RANK[Role.editor]
-    try:
-        while True:
-            text = await websocket.receive_text()
-            if len(text) > MAX_OPS_MESSAGE_BYTES:
-                await peer.send({"type": "error", "message": "Message too large"})
-                continue
-            message = _parse(text)
-            kind = message.get("type")
-            if kind == "ops":
-                if not can_edit:
-                    await peer.send({"type": "error", "message": "Read-only access"})
-                    continue
-                ops = message.get("ops")
-                op_id = message.get("opId")
-                if not _valid_ops(ops) or not isinstance(op_id, str) or not 0 < len(op_id) <= 64:
-                    await peer.send({"type": "error", "message": "Invalid operations"})
-                    continue
-                rev, created = await _append_ops(workbook_id, user.id, peer.client_id, op_id, ops)
-                await peer.send({"type": "ack", "opId": op_id, "rev": rev})
-                if not created:
-                    continue
-                await hub.publish(
-                    workbook_id,
-                    {
-                        "type": "ops",
-                        "rev": rev,
-                        "ops": ops,
-                        "clientId": peer.client_id,
-                        "userId": str(user.id),
-                    },
-                    exclude=peer.client_id,
-                )
-            elif kind == "presence":
-                await hub.update_presence(workbook_id, peer, message.get("selection"))
-            elif kind == "ping":
-                await hub.touch(workbook_id, peer)
-                await peer.send({"type": "pong"})
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await hub.leave(workbook_id, peer)
-
-
-def _parse(text: str) -> dict[str, Any]:
-    try:
-        value = json.loads(text)
-    except ValueError:
-        return {}
-    return value if isinstance(value, dict) else {}

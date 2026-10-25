@@ -6,6 +6,7 @@ import {
   Baseline,
   Bold,
   ChevronDown,
+  Contrast,
   Filter,
   Grid3x3,
   Italic,
@@ -73,6 +74,7 @@ function ColorPicker({
   onPick,
   onReset,
   disabled,
+  inverted,
 }: {
   label: string;
   icon: ReactNode;
@@ -80,7 +82,10 @@ function ColorPicker({
   onPick: (color: string) => void;
   onReset: () => void;
   disabled?: boolean;
+  inverted: boolean;
 }) {
+  // Swatches show the color as the canvas renders it.
+  const shown = (color: string) => (inverted ? displayColor(color) : color);
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
@@ -89,7 +94,7 @@ function ColorPicker({
             {icon}
             <span
               className="-mt-0.5 h-[3px] w-4 rounded-full"
-              style={{ background: current ? displayColor(current) : 'transparent' }}
+              style={{ background: current ? shown(current) : 'transparent' }}
             />
           </span>
           <ChevronDown className="size-3 text-fg-subtle" />
@@ -114,7 +119,7 @@ function ColorPicker({
                     'size-5 rounded-full ring-1 ring-white/10 transition hover:scale-110',
                     current?.toUpperCase() === color && 'ring-2 ring-accent',
                   )}
-                  style={{ background: displayColor(color) }}
+                  style={{ background: shown(color) }}
                 />
               </Popover.Close>
             ))}
@@ -131,12 +136,16 @@ export function Toolbar({
   readOnly,
   zoom,
   onZoom,
+  inverted,
+  onToggleInverted,
 }: {
   api: FUniver | null;
   selection: SelectionState;
   readOnly: boolean;
   zoom: number;
   onZoom: (value: number) => void;
+  inverted: boolean;
+  onToggleInverted: () => void;
 }) {
   const disabled = !api || readOnly;
   const call = (fn: (api: FUniver) => void) => () => api && fn(api);
@@ -166,6 +175,7 @@ export function Toolbar({
           </MenuItem>
         ))}
       </Dropdown>
+      <InvertButton inverted={inverted} onToggle={onToggleInverted} disabled={!api} />
       <Divider />
 
       <Dropdown label="Шрифт" width={128} value={selection.fontFamily}>
@@ -214,6 +224,7 @@ export function Toolbar({
         disabled={disabled}
         onPick={(color) => api && commands.textColor(api, color)}
         onReset={call(commands.resetTextColor)}
+        inverted={inverted}
       />
       <ColorPicker
         label="Цвет заливки"
@@ -222,6 +233,7 @@ export function Toolbar({
         disabled={disabled}
         onPick={(color) => api && commands.background(api, color)}
         onReset={call(commands.resetBackground)}
+        inverted={inverted}
       />
       <Divider />
 
@@ -346,5 +358,27 @@ export function Toolbar({
         </MenuContent>
       </Menu>
     </div>
+  );
+}
+
+/** Toggles color inversion of the sheet canvas (dark rendering of light documents). */
+export function InvertButton({
+  inverted,
+  onToggle,
+  disabled,
+}: {
+  inverted: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <IconButton
+      label={inverted ? 'Показать исходные цвета таблицы' : 'Инвертировать цвета таблицы'}
+      active={!inverted}
+      disabled={disabled}
+      onClick={onToggle}
+    >
+      <Contrast className="size-[17px]" />
+    </IconButton>
   );
 }

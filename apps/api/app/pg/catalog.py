@@ -43,7 +43,11 @@ class CatalogError(ValueError):
 
 
 class EditConflict(Exception):
-    pass
+    """A row to update no longer matches the values the client edited."""
+
+    def __init__(self, pk: dict[str, str | None]) -> None:
+        super().__init__("Row was changed or deleted by someone else")
+        self.pk = pk
 
 
 def quote_ident(name: str) -> str:
@@ -359,6 +363,12 @@ class RowInsert(BaseModel):
     values: dict[str, str | None]
 
 
+class RowDelete(BaseModel):
+    pk: dict[str, str | None]
+    # Row values the client saw (text form); the row is deleted only if they still match.
+    expected: dict[str, str | None] | None = None
+
+
 def _require_editable(info: TableInfo, action: Literal["update", "insert", "delete"]) -> None:
     if not info.editable:
         raise CatalogError("Only tables with a primary key can be edited")
@@ -387,6 +397,18 @@ def _assignable(info: TableInfo, name: str) -> Column:
     return col
 
 
+def _expected_clause(
+    info: TableInfo, expected: dict[str, str | None] | None, params: _Params
+) -> str:
+    """Extra WHERE conditions: columns still hold the values the client saw (text form)."""
+    clause = ""
+    for name, value in (expected or {}).items():
+        col = info.column(name)
+        p = params.add(value)
+        clause += f" AND {quote_ident(col.name)}::text IS NOT DISTINCT FROM {p}::text"
+    return clause
+
+
 async def update_rows(
     conn: asyncpg.Connection, info: TableInfo, changes: list[RowChange]
 ) -> list[list[str | None]]:
@@ -400,18 +422,16 @@ async def update_rows(
                 col = _assignable(info, name)
                 rhs = "NULL" if value is None else _cast(params.add(value), col)
                 sets.append(f"{quote_ident(name)} = {rhs}")
-            where = _pk_clause(info, change.pk, params)
-            for name, value in (change.expected or {}).items():
-                col = info.column(name)
-                p = params.add(value)
-                where += f" AND {quote_ident(col.name)}::text IS NOT DISTINCT FROM {p}::text"
+            where = _pk_clause(info, change.pk, params) + _expected_clause(
+                info, change.expected, params
+            )
             row = await conn.fetchrow(
                 f"UPDATE {info.qualified} SET {', '.join(sets)} WHERE {where}"
                 f" RETURNING {_select_list(info)}",
                 *params.values,
             )
             if row is None:
-                raise EditConflict("Row was changed or deleted by someone else")
+                raise EditConflict(change.pk)
             result.append(list(row.values()))
     return result
 
@@ -449,6 +469,59 @@ async def delete_rows(
             )
             deleted += int(status.split()[-1])
     return deleted
+
+
+async def delete_checked(conn: asyncpg.Connection, info: TableInfo, row: RowDelete) -> None:
+    """Delete one row; EditConflict if it is gone or no longer matches `expected`."""
+    _require_editable(info, "delete")
+    params = _Params()
+    where = _pk_clause(info, row.pk, params) + _expected_clause(info, row.expected, params)
+    status = await conn.execute(f"DELETE FROM {info.qualified} WHERE {where}", *params.values)
+    if int(status.split()[-1]) == 0:
+        raise EditConflict(row.pk)
+
+
+class ChangeFailed(Exception):
+    """A statement of a change batch failed; identifies which one for the client."""
+
+    def __init__(self, op: Literal["update", "insert", "delete"], index: int, cause: Exception):
+        super().__init__(str(cause))
+        self.op = op
+        self.index = index
+        self.cause = cause
+
+
+async def apply_changes(
+    conn: asyncpg.Connection,
+    info: TableInfo,
+    updates: list[RowChange],
+    inserts: list[RowInsert],
+    deletes: list[RowDelete],
+) -> dict[str, Any]:
+    """Apply updates, deletes and inserts in one transaction: all of them or none."""
+    result: dict[str, Any] = {"updated": [], "inserted": [], "deleted": 0}
+    async with conn.transaction():
+        for index, change in enumerate(updates):
+            try:
+                result["updated"] += await update_rows(conn, info, [change])
+            except EditConflict:
+                raise
+            except Exception as exc:
+                raise ChangeFailed("update", index, exc) from exc
+        for index, target in enumerate(deletes):
+            try:
+                await delete_checked(conn, info, target)
+                result["deleted"] += 1
+            except EditConflict:
+                raise
+            except Exception as exc:
+                raise ChangeFailed("delete", index, exc) from exc
+        for index, row in enumerate(inserts):
+            try:
+                result["inserted"].append(await insert_row(conn, info, row))
+            except Exception as exc:
+                raise ChangeFailed("insert", index, exc) from exc
+    return result
 
 
 # ------------------------------------------------------------------ ad-hoc queries

@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     environment: Literal["dev", "prod"] = "dev"
 
     database_url: str = "postgresql+asyncpg://thule:thule@127.0.0.1:55432/thule_sheets"
-    redis_url: str | None = None
     # Disable pooling when the event loop changes between uses (tests).
     db_pool: bool = True
 

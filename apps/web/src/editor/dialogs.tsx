@@ -102,12 +102,17 @@ export function VersionsDialog({
   open,
   onOpenChange,
   canRestore,
+  hasUnsavedChanges,
+  onBeforeCreate,
   onRestored,
 }: {
   workbookId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   canRestore: boolean;
+  hasUnsavedChanges: boolean;
+  /** Saves pending edits so the version captures them; resolves to false to abort. */
+  onBeforeCreate: () => Promise<boolean>;
   onRestored: () => void;
 }) {
   const toast = useToast();
@@ -120,6 +125,7 @@ export function VersionsDialog({
   const [label, setLabel] = useState('');
 
   async function save() {
+    if (!(await onBeforeCreate())) return;
     await api.createVersion(workbookId, label.trim() || null);
     setLabel('');
     await queryClient.invalidateQueries({ queryKey: ['versions', workbookId] });
@@ -127,7 +133,10 @@ export function VersionsDialog({
   }
 
   async function restore(id: string) {
-    if (!window.confirm('Восстановить эту версию? Текущее состояние сохранится как отдельная версия.')) return;
+    const message = hasUnsavedChanges
+      ? 'Восстановить эту версию? Несохранённые изменения будут потеряны, последнее сохранённое состояние останется в истории как отдельная версия.'
+      : 'Восстановить эту версию? Текущее состояние сохранится как отдельная версия.';
+    if (!window.confirm(message)) return;
     try {
       await api.restoreVersion(workbookId, id);
       onRestored();

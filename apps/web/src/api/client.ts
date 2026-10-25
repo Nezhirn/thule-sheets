@@ -33,18 +33,28 @@ export interface WorkbookDetail {
   workspace_name: string;
   role: Role;
   favorite: boolean;
-  head_rev: number;
-  snapshot_rev: number;
+  // Incremented on every save; sent back as base_rev to detect concurrent saves.
+  rev: number;
+  saved_at: string;
+  saved_by: string | null;
+  saved_by_id: string | null;
   // Univer IWorkbookData
   snapshot: Record<string, unknown>;
   updated_at: string;
 }
 
-export interface OpsBatch {
+export interface SaveResult {
   rev: number;
-  client_id: string;
-  op_id: string | null;
-  ops: Array<Record<string, unknown>>;
+  saved_at: string;
+}
+
+/** Body of a 409 response to a save: someone else saved a newer revision. */
+export interface SaveConflict {
+  message: string;
+  rev: number;
+  saved_at: string;
+  saved_by: string | null;
+  saved_by_id: string | null;
 }
 
 export interface Share {
@@ -149,6 +159,23 @@ export interface RowsPage {
   total_exact: boolean;
 }
 
+export type RowKey = Record<string, string | null>;
+
+export interface DbChanges {
+  updates: Array<{ pk: RowKey; values: Record<string, string | null>; expected: Record<string, string | null> }>;
+  inserts: Array<{ values: Record<string, string | null> }>;
+  deletes: Array<{ pk: RowKey; expected: Record<string, string | null> }>;
+}
+
+/** Error detail of a failed change batch: which statement failed. */
+export interface DbChangeError {
+  message?: string;
+  sqlstate?: string;
+  op?: 'update' | 'insert' | 'delete';
+  index?: number;
+  pk?: RowKey;
+}
+
 export interface QueryResult {
   columns: Array<{ name: string; type: string }>;
   rows: unknown[][];
@@ -243,12 +270,8 @@ export const api = {
   deleteWorkbook: (id: string) => request<void>('DELETE', `/workbooks/${id}`),
   setFavorite: (id: string, favorite: boolean) =>
     request<void>(favorite ? 'PUT' : 'DELETE', `/workbooks/${id}/favorite`),
-  ops: (id: string, since: number) => request<OpsBatch[]>('GET', `/workbooks/${id}/ops?since=${since}`),
-  saveSnapshot: (id: string, rev: number, snapshot: unknown) =>
-    request<{ snapshot_rev: number; head_rev: number }>('PUT', `/workbooks/${id}/snapshot`, {
-      rev,
-      snapshot,
-    }),
+  saveSnapshot: (id: string, baseRev: number, snapshot: unknown, force = false) =>
+    request<SaveResult>('PUT', `/workbooks/${id}/snapshot`, { base_rev: baseRev, snapshot, force }),
   shares: (id: string) => request<Share[]>('GET', `/workbooks/${id}/shares`),
   share: (id: string, email: string, role: 'viewer' | 'editor') =>
     request<Share>('PUT', `/workbooks/${id}/shares`, { email, role }),
@@ -257,10 +280,7 @@ export const api = {
   createVersion: (id: string, label: string | null) =>
     request<Version>('POST', `/workbooks/${id}/versions`, { label }),
   restoreVersion: (id: string, versionId: string) =>
-    request<{ snapshot_rev: number; head_rev: number }>(
-      'POST',
-      `/workbooks/${id}/versions/${versionId}/restore`,
-    ),
+    request<SaveResult>('POST', `/workbooks/${id}/versions/${versionId}/restore`),
   importFile: (workspaceId: string, file: File) => {
     const form = new FormData();
     form.set('workspace_id', workspaceId);
@@ -309,6 +329,13 @@ export const api = {
       'PATCH',
       `/connections/${id}/schemas/${enc(schema)}/tables/${enc(table)}/rows`,
       { changes },
+    ),
+  /** Saves table-editor changes in one transaction: all of them or none. */
+  applyChanges: (id: string, schema: string, table: string, changes: DbChanges) =>
+    request<{ updated: Array<Array<string | null>>; inserted: Array<Array<string | null>>; deleted: number }>(
+      'POST',
+      `/connections/${id}/schemas/${enc(schema)}/tables/${enc(table)}/rows/apply`,
+      changes,
     ),
   insertRow: (id: string, schema: string, table: string, values: Record<string, string | null>) =>
     request<{ row: Array<string | null> }>(

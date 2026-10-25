@@ -33,11 +33,14 @@ export function FormulaBar({
     const sheet = match[1] ? workbook.getSheetByName(match[1]) : workbook.getActiveSheet();
     if (!sheet) return;
     workbook.setActiveSheet(sheet);
-    sheet.getRange(match[2].toUpperCase()).activate();
+    const range = sheet.getRange(match[2].toUpperCase());
+    range.activate();
+    // activate() selects without scrolling; bring the target into view.
+    sheet.scrollToCell(range.getRow(), range.getColumn());
   }
 
   return (
-    <div className="flex h-11 items-stretch gap-2 px-3 pb-2">
+    <div className="flex h-9 shrink-0 items-stretch gap-2">
       <label className="flex w-36 items-center gap-1 rounded-[10px] bg-white/[0.03] px-3 hairline focus-within:border-accent/60">
         <input
           value={address}

@@ -90,27 +90,12 @@ class Workbook(Base):
     created_at: Mapped[datetime] = _created_at()
     # Set explicitly on content and metadata changes.
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    # Revision of the last accepted operation batch.
-    head_rev: Mapped[int] = mapped_column(Integer, default=0)
-    # Latest full snapshot (Univer IWorkbookData) and the revision it reflects.
+    # Latest saved snapshot (Univer IWorkbookData). Content changes only on an explicit save.
     snapshot: Mapped[JSON] = mapped_column(JSONB)
-    snapshot_rev: Mapped[int] = mapped_column(Integer, default=0)
-
-
-class WorkbookOp(Base):
-    __tablename__ = "workbook_ops"
-    # Clients resend a batch after reconnecting; op_id makes the append idempotent.
-    __table_args__ = (UniqueConstraint("workbook_id", "op_id"),)
-
-    workbook_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("workbooks.id", ondelete="CASCADE"), primary_key=True
-    )
-    rev: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    client_id: Mapped[str] = mapped_column(String(64))
-    op_id: Mapped[str | None] = mapped_column(String(64))
-    ops: Mapped[list[Any]] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = _created_at()
+    # Incremented on every content save; clients send it back for optimistic locking.
+    rev: Mapped[int] = mapped_column(Integer, default=0)
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    saved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class WorkbookVersion(Base):
@@ -211,7 +196,6 @@ __all__ = [
     "ROLE_RANK",
     "User",
     "Workbook",
-    "WorkbookOp",
     "WorkbookShare",
     "WorkbookVersion",
     "Workspace",

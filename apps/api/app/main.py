@@ -11,18 +11,14 @@ from app.config import get_settings, validate_production
 from app.db import engine
 from app.pg.pools import pools
 from app.routers import auth, connections, files, workbooks, workspaces
-from app.services.collab import hub
 
 logging.basicConfig(level=logging.INFO)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
-    validate_production(settings)
-    await hub.start(settings.redis_url)
+    validate_production(get_settings())
     yield
-    await hub.stop()
     await pools.close_all()
     await engine.dispose()
 

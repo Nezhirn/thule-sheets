@@ -1,7 +1,7 @@
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 TEST_DB = os.environ.get(
@@ -11,12 +11,10 @@ TEST_DB = os.environ.get(
 os.environ["THULE_DATABASE_URL"] = TEST_DB
 os.environ["THULE_DB_POOL"] = "false"
 os.environ["THULE_ALLOW_PRIVATE_DB_HOSTS"] = "true"
-os.environ.pop("THULE_REDIS_URL", None)
 
 import asyncpg  # noqa: E402
 import httpx  # noqa: E402
 import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
 from app.pg.pools import pools  # noqa: E402
@@ -25,7 +23,7 @@ API_DIR = Path(__file__).resolve().parents[1]
 RAW_DSN = TEST_DB.replace("postgresql+asyncpg://", "postgresql://")
 TABLES = (
     "audit_log, db_connections, recent_views, favorites, workbook_shares, workbook_versions, "
-    "workbook_ops, workbooks, workspace_members, workspaces, users"
+    "workbooks, workspace_members, workspaces, users"
 )
 
 
@@ -67,9 +65,3 @@ async def register(client: httpx.AsyncClient, email: str, name: str = "Test") ->
 async def personal_workspace(client: httpx.AsyncClient) -> str:
     r = await client.get("/api/workspaces")
     return next(w["id"] for w in r.json() if w["is_personal"])
-
-
-@pytest.fixture
-def sync_client() -> Iterator[TestClient]:
-    with TestClient(app) as c:
-        yield c

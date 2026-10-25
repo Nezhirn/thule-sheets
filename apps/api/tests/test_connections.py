@@ -143,6 +143,21 @@ async def test_edit_rows(client: httpx.AsyncClient, demo_db: None) -> None:
         },
     )
     assert r.status_code == 409
+    assert r.json()["detail"]["pk"] == {"id": "1"}
+
+    # A batch is saved atomically: one stale row rejects the whole batch.
+    r = await client.patch(
+        url,
+        json={
+            "changes": [
+                {"pk": {"id": "3"}, "values": {"note": "batch"}},
+                {"pk": {"id": "1"}, "values": {"amount": "1"}, "expected": {"amount": "10.50"}},
+            ]
+        },
+    )
+    assert r.status_code == 409
+    r = await client.post(url, json={"offset": 0, "limit": 5})
+    assert r.json()["rows"][2][5] != "batch"
 
     r = await client.patch(
         url, json={"changes": [{"pk": {"id": "2"}, "values": {"status": "bad"}}]}
@@ -162,6 +177,76 @@ async def test_edit_rows(client: httpx.AsyncClient, demo_db: None) -> None:
         json={"values": {"message": "x"}},
     )
     assert r.status_code == 400
+
+
+async def test_apply_changes_is_atomic(client: httpx.AsyncClient, demo_db: None) -> None:
+    cid = await _connection(client)
+    base = f"/api/connections/{cid}/schemas/demo/tables/orders/rows"
+
+    async def count() -> int:
+        page = (await client.post(base, json={"offset": 0, "limit": 100})).json()
+        return len(page["rows"])
+
+    # The insert violates NOT NULL: the update and the delete are rolled back too.
+    r = await client.post(
+        f"{base}/apply",
+        json={
+            "updates": [{"pk": {"id": "2"}, "values": {"note": "applied"}}],
+            "deletes": [{"pk": {"id": "3"}}],
+            "inserts": [{"values": {"customer_id": "1", "amount": "5"}}, {"values": {"note": "x"}}],
+        },
+    )
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert detail["op"] == "insert" and detail["index"] == 1 and detail["sqlstate"] == "23502"
+    assert await count() == 25
+    rows = (await client.post(base, json={"offset": 0, "limit": 3})).json()["rows"]
+    assert rows[1][5] != "applied"
+
+    r = await client.post(
+        f"{base}/apply",
+        json={
+            "updates": [
+                {"pk": {"id": "2"}, "values": {"note": "applied"}, "expected": {"note": "заказ 2"}}
+            ],
+            "deletes": [{"pk": {"id": "3"}}],
+            "inserts": [{"values": {"customer_id": "1", "amount": "5"}}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (
+        body["deleted"] == 1 and len(body["inserted"]) == 1 and body["updated"][0][5] == "applied"
+    )
+    assert await count() == 25
+
+    empty = await client.post(f"{base}/apply", json={})
+    assert empty.status_code == 422
+
+    # A row changed since it was loaded is not deleted: conflict, and nothing else is applied.
+    rows = (await client.post(base, json={"offset": 0, "limit": 5})).json()["rows"]
+    loaded = dict(
+        zip(["id", "customer_id", "amount", "status", "created_at", "note"], rows[3], strict=True)
+    )
+    db = await asyncpg.connect(RAW_DSN)
+    await db.execute(
+        "UPDATE demo.orders SET note = 'changed elsewhere' WHERE id = $1", int(loaded["id"])
+    )
+    await db.close()
+    r = await client.post(
+        f"{base}/apply",
+        json={
+            "updates": [{"pk": {"id": "2"}, "values": {"note": "second"}}],
+            "deletes": [{"pk": {"id": loaded["id"]}, "expected": loaded}],
+        },
+    )
+    assert r.status_code == 409 and r.json()["detail"]["pk"] == {"id": loaded["id"]}
+    rows = (await client.post(base, json={"offset": 0, "limit": 5})).json()["rows"]
+    assert rows[1][5] == "applied" and rows[3][5] == "changed elsewhere"
+
+    # A row that is already gone is a conflict too, not a silent no-op.
+    r = await client.post(f"{base}/apply", json={"deletes": [{"pk": {"id": "999999"}}]})
+    assert r.status_code == 409
 
 
 async def test_read_only_connection_and_queries(client: httpx.AsyncClient, demo_db: None) -> None:
